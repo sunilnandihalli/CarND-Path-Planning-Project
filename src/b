@@ -1,0 +1,2 @@
+#!/bin/bash -v
+cd .. && mkdir -p build && cd build && cmake ../ && make
