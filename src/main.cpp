@@ -9,8 +9,29 @@
 #include "Eigen-3.3/Eigen/QR"
 #include "json.hpp"
 #include "spline.h"
-
 using namespace std;
+#include <cmath>
+#include "Eigen-3.3/Eigen/Dense"
+using Eigen::MatrixXd;
+using Eigen::VectorXd;
+vector<double> JMT(vector< double> start, vector <double> end, double T) {
+  MatrixXd A = MatrixXd(3, 3);
+  A << T*T*T, T*T*T*T, T*T*T*T*T,
+  3*T*T, 4*T*T*T,5*T*T*T*T,
+  6*T, 12*T*T, 20*T*T*T;
+  MatrixXd B = MatrixXd(3,1);
+  B << end[0]-(start[0]+start[1]*T+.5*start[2]*T*T),
+  end[1]-(start[1]+start[2]*T),
+  end[2]-start[2];
+  MatrixXd Ai = A.inverse();
+  MatrixXd C = Ai*B;
+  vector <double> result = {start[0], start[1], .5*start[2]};
+  for(int i = 0; i < C.size(); i++) {
+    result.push_back(C.data()[i]);
+  }
+  return result;
+}
+
 
 // for convenience
 using json = nlohmann::json;
@@ -127,6 +148,8 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
   return {x,y};
 }
 
+
+
 int main() {
   uWS::Hub h;
   // Load up map values for waypoint's x,y,s and d normalized normal vectors
@@ -163,11 +186,14 @@ int main() {
   }
   h.onMessage([&ref_vel,&lane,&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy](uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length,
   uWS::OpCode opCode) {
-    // "42" at the start of the message means there's a websocket message event.
-    // The 4 signifies a websocket message
-    // The 2 signifies a websocket event
-    //auto sdata = string(data).substr(0, length);
-    //cout << sdata << endl;
+    const double mps2mph = 2.23694;
+    const double dt = 0.02; // time between waypoints
+    const double time_horizon = 1; // time horizon in seconds
+    const int num_waypoints = time_horizon/dt;
+    const double lane_width = 4.0;
+    const double max_jerk = 10; // meters per sec^3
+    const double max_acc = 10; // meters per sec^2
+    const double max_vel = 22.352; // meters per sec
     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
       auto s = hasData(data);
       if (s != "") {
@@ -191,27 +217,37 @@ int main() {
           double end_path_s = j[1]["end_path_s"];
           double end_path_d = j[1]["end_path_d"];
           auto sensor_fusion = j[1]["sensor_fusion"];
+          int nextWayPointId = NextWaypoint(car_x,car_y,car_yaw,map_waypoints_x,map_waypoints_y);
+          double cdir_dx = map_waypoints_x[nextWayPointId]-car_x;
+          double cdir_dy = map_waypoints_y[nextWayPointId]-car_y;
+          std::cout<<"--------------------------------------------------------------------------------"<<std::endl;
+          std::cout<<" prev_size : "<<prev_size<<" num_cars : "<<sensor_fusion.size()<<std::endl;
+          std::cout<<" car_x : "<<car_x<<" car_y : "<<car_y<<" car_s : "<<car_s<<" car_d : "<<car_d<<" car_yaw : "<<car_yaw<<" car_speed : "<<car_speed<<std::endl;
+          std::cout<<" cdir_dx : "<<cdir_dx<<" cdir_dy : "<<cdir_dy<<std::endl;
+          for(auto sf : sensor_fusion) {
+            double vx(sf[3]),vy(sf[4]);
+            std::cout<<" id : "<<sf[0]<<" x : "<<sf[1]<<" y : "<<sf[2]<<" vx : "<<sf[3]<<" vy : "<<sf[4]<<" s : "<<sf[5]<<" d : "<<sf[6]<<" speed : "<<sqrt(vx*vx+vy*vy)*mps2mph<<std::endl;
+          }
           if(prev_size>0)
             car_s = end_path_s;
           bool too_close = false;
-          for(int i=0;i<sensor_fusion.size();i++) {
+          for(int i=0; i<sensor_fusion.size(); i++) {
             float d = sensor_fusion[i][6];
-            if(d<(2+4*lane+2)&&d>(2+2*lane-2)) {
+            if(d<(lane_width*(lane+1))&&d>(lane_width*lane)) {
               double vx = sensor_fusion[i][3];
               double vy = sensor_fusion[i][4];
               double check_speed = sqrt(vx*vx + vy*vy);
               double check_car_s = sensor_fusion[i][5];
-
-              check_car_s += ((double)prev_size*0.02*check_speed);
+              check_car_s += ((double)prev_size*dt*check_speed);
               if(check_car_s>car_s && (check_car_s-car_s)<30) {
                 too_close=true;
               }
             }
           }
           if(too_close) {
-            ref_vel -= 0.224;
+            ref_vel -= 0.1*mps2mph;
           } else if (ref_vel<49.5) {
-            ref_vel += 0.224;
+            ref_vel += 0.1*mps2mph;
           }
           if(prev_size<2) {
             double prev_car_x = car_x - cos(car_yaw);
@@ -237,55 +273,42 @@ int main() {
           ptsx.push_back(next_wp0[0]);
           ptsx.push_back(next_wp1[0]);
           ptsx.push_back(next_wp2[0]);
-
           ptsy.push_back(next_wp0[1]);
           ptsy.push_back(next_wp1[1]);
           ptsy.push_back(next_wp2[1]);
-
-          for(int i=0;i<ptsx.size();i++) {
+          for(int i=0; i<ptsx.size(); i++) {
             double shift_x = ptsx[i] - ref_x;
             double shift_y = ptsy[i] - ref_y;
-
             ptsx[i] = (shift_x*cos(0-ref_yaw)-shift_y*sin(0-ref_yaw));
             ptsy[i] = (shift_x*sin(0-ref_yaw)+shift_y*cos(0-ref_yaw));
           }
           tk::spline s;
           s.set_points(ptsx,ptsy);
-
-
           json msgJson;
           vector<double> next_x_vals;
           vector<double> next_y_vals;
-
-          for(int i=0;i<previous_path_x.size();i++) {
+          for(int i=0; i<previous_path_x.size(); i++) {
             next_x_vals.push_back(previous_path_x[i]);
             next_y_vals.push_back(previous_path_y[i]);
           }
           double target_x = 30.0;
           double target_y = s(target_x);
           double target_dist = sqrt(target_x*target_x+target_y*target_y);
-
           double x_add_on = 0;
-
-          for(int i=1; i<=50-previous_path_x.size();i++){
-            double N = (target_dist/(0.02*ref_vel/2.24));
+          for(int i=1; i<=num_waypoints-previous_path_x.size(); i++) {
+            double N = (target_dist/(dt*ref_vel/mps2mph));
             double x_point = x_add_on + target_x/N;
             double y_point = s(x_point);
-
             x_add_on = x_point;
             double x_ref = x_point;
             double y_ref = y_point;
-
             x_point = x_ref*cos(ref_yaw)-y_ref*sin(ref_yaw);
             y_point = x_ref*sin(ref_yaw)+y_ref*cos(ref_yaw);
-
             x_point += ref_x;
             y_point += ref_y;
-
             next_x_vals.push_back(x_point);
             next_y_vals.push_back(y_point);
           }
-
           // TODO: define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
