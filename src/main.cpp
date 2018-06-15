@@ -168,12 +168,12 @@ vector<double> getXY(double s,
 const double max_s = 6945.554;
 const double mps2mph = 2.23694;
 const double dt = 0.02; // time between waypoints
-const double time_horizon = 2; // time horizon in seconds
+const double time_horizon = 3.0; // time horizon in seconds
 const int num_waypoints = time_horizon / dt;
 const double lane_width = 4.0;
 const double max_jerk = 5; // meters per sec^3
 const double max_acc = 5; // meters per sec^2
-const double max_vel_mph = 49;
+const double max_vel_mph = 45;
 const double max_vel = max_vel_mph / mps2mph; // meters per sec
 const double max_acc_change_per_frame = max_jerk * dt;
 const double sentinel = 999999999;
@@ -193,8 +193,9 @@ double dist(double s1, double s2) {
   } else if (ret < -thr) {
     ret += max_s;
   }
-  if(abs(ret)>thr) {
-    std::cout<<"s1 : "<<s1<<" s2 : "<<s2<<" ret : "<<ret<<" thr : "<<thr<<std::endl;
+  if (abs(ret) > thr) {
+    std::cout << "s1 : " << s1 << " s2 : " << s2 << " ret : " << ret
+              << " thr : " << thr << std::endl;
 //    assert(abs(ret) < thr);
   }
   return ret;
@@ -274,10 +275,14 @@ possibleToChange(int laneId,
       double_equals(nearest_car_back_s_time_horizon, sentinel);
   bool no_vehicle_front =
       double_equals(nearest_car_front_s_time_horizon, sentinel);
-  std::cout<<" lane_id : "<<laneId
-           <<" nearest_car_back_s : "<<nearest_car_back_s<<" v : "<<nearest_car_back_vel
-           <<" car_s              : "<<car_s <<" v : "<<car_v
-           <<" nearest_car_front_s : "<<nearest_car_front_s<<" v : "<<nearest_car_front_vel<<std::endl;
+  /*
+  std::cout << " lane_id : " << laneId
+            << " nearest_car_back_s : " << nearest_car_back_s << " v : "
+            << nearest_car_back_vel
+            << " car_s              : " << car_s << " v : " << car_v
+            << " nearest_car_front_s : " << nearest_car_front_s << " v : "
+            << nearest_car_front_vel << std::endl;
+  */
   if (no_vehicle_behind && no_vehicle_front) {
     target_s = advance_s(time_horizon, car_s, max_vel);
     target_vel = max_vel;
@@ -306,67 +311,165 @@ possibleToChange(int laneId,
   }
   return false;
 }
-double jerk_s(double t,double k,double T) {
-  if(t<0.5*T)
+double calc_dist(double x1,double y1,double x2,double y2) {
+  double dx=x2-x1,dy=y2-y1;
+  return sqrt(dx*dx+dy*dy);
+}
+double calc_vel(double x1,double y1,double x2,double y2) {
+  return calc_dist(x1,y1,x2,y2)/dt;
+}
+double calc_angle(double x1,double y1,double x2 ,double y2 ,double x3,double y3){
+  double theta1 = atan2(x2-x1,y2-y1);
+  double theta2 = atan2(x3-x2,y3-y2);
+  return theta2-theta1;
+}
+double calc_omega(double x1,double y1,double x2 ,double y2 ,double x3,double y3){
+  return calc_angle(x1,y1,x2,y2,x3,y3)/dt;
+}
+double calc_radius(double x1,double y1,double x2,double y2,double x3,double y3) {
+  return calc_dist(x2,y2,x3,y3)/calc_angle(x1,y1,x2,y2,x3,y3);
+}
+double calc_linear_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
+  double v1 = calc_vel(x1,y1,x2,y2);
+  double v2 = calc_vel(x2,y2,x3,y3);
+  return (v2-v1)/dt;
+}
+double calc_radial_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
+  double v = calc_vel(x2,y2,x3,y3);
+  double r = calc_radius(x1,y1,x2,y2,x3,y3);
+  return v*v/r;
+}
+double calc_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
+  double al = calc_linear_acc(x1,y1,x2,y2,x3,y3);
+  double ar = calc_radial_acc(x1,y1,x2,y2,x3,y3);
+  return sqrt(al*al+ar*ar);
+}
+double calc_jerk(double x1,double y1,double x2,double y2,double x3,double y3,double x4,double y4) {
+  double a1 = calc_acc(x1,y1,x2,y2,x3,y3);
+  double a2 = calc_acc(x2,y2,x3,y3,x4,y4);
+  return (a2-a1)/dt;
+}
+struct l4points {
+  int n;
+  double x1,x2,x3,x4,y1,y2,y3,y4;
+  l4points() {
+    n = 0;
+    x1=x2=x3=x4=y1=y2=y3=y4=sentinel;
+  }
+  void addPoint(double x,double y) {
+    x1=x2;
+    x2=x3;
+    x3=x4;
+    x4=x;
+    y1=y2;
+    y2=y3;
+    y3=y4;
+    y4=y;
+    n+=1;
+  }
+
+};
+double jerk_s(double t, double k, double T) {
+  if (t < 0.5 * T)
     return k;
-  else if(t<=T)
+  else if (t <= T)
     return -k;
 }
 
-double acc_s(double t,double k,double T) {
-  if(t<0.5*T)
-    return k*t;
-  else if (t<=T)
-    return k*(T-t);
+double acc_s(double t, double k, double T) {
+  if (t < 0.5 * T)
+    return k * t;
+  else if (t <= T)
+    return k * (T - t);
 }
 
-double vel_s(double t,double k,double T,double v0) {
-  if(t<0.5*T)
-    return v0+k*t*t*0.5;
-  else if (t<=T)
-    return v0+k*(T*t-t*t*0.5-T*T*0.25);
+double vel_s(double t, double k, double T, double v0) {
+  if (t < 0.5 * T)
+    return v0 + k * t * t * 0.5;
+  else if (t <= T)
+    return v0 + k * (T * t - t * t * 0.5 - T * T * 0.25);
 }
 
-double jerk_d(double t,double k,double T) {
-  if(t<0.25*T)
+double jerk_d(double t, double k, double T) {
+  if (t < 0.25 * T)
     return k;
-  else if (t<0.75*T)
+  else if (t < 0.75 * T)
     return -k;
-  else if (t<T)
+  else if (t < T)
     return k;
 }
 
-double acc_d(double t,double k,double T) {
-  if(t<0.25*T)
-    return k*t;
-  else if(t<0.75*T)
-    return k*(0.5*T-t);
-  else if(t<T)
-    return k*(t-T);
+double acc_d(double t, double k, double T) {
+  if (t < 0.25 * T)
+    return k * t;
+  else if (t < 0.75 * T)
+    return k * (0.5 * T - t);
+  else if (t < T)
+    return k * (t - T);
 }
 
-double vel_d(double t,double k,double T) {
-  if(t<0.25*T)
-    return k*t*t*0.5;
-  else if(t<0.75*T)
-    return k*0.5*(T*t-t*t-T*T/16);
-  else if(t<T)
-    return k*(t*t*0.5+T*T*0.5-t*T);
+double vel_d(double t, double k, double T) {
+  if (t < 0.25 * T)
+    return k * t * t * 0.5;
+  else if (t < 0.75 * T)
+    return k * 0.5 * (T * t - t * t - T * T / 16);
+  else if (t < T)
+    return k * (t * t * 0.5 + T * T * 0.5 - t * T);
 }
 
-double delta_d(double t,double k,double T) {
-  if(t<0.25*T)
-    return k*t*t*t/6;
-  else if(t<0.75*T)
-    return k*(T*t*t/4 - t*t*t/6 - T*T*t/16 + T*T*T/(3*64));
-  else if(t<T)
-    return k*(-T*t*t/2+t*t*t/6+T*T*t/2-26*T*T*T/(3*64));
+double calc_cur_delta_d(double t, double k, double T) {
+  if (t < 0.25 * T)
+    return k * t * t * t / 6;
+  else if (t < 0.75 * T)
+    return k * (T * t * t / 4 - t * t * t / 6 - T * T * t / 16
+        + T * T * T / (3 * 64));
+  else if (t < T)
+    return k * (-T * t * t / 2 + t * t * t / 6 + T * T * t / 2
+        - 26 * T * T * T / (3 * 64));
 }
 
-void calc_params(double delta_d,double delta_sdot,double& kd,double& ks,double& Td,double& Ts) {
-  kd = 32*delta_d/(Td*Td*Td);
-  ks = 4*delta_sdot/(Ts*Ts);
+double calc_kd(double delta_d, double Td) {
+  return 32 * delta_d / (Td * Td * Td);
 }
+bool should_drive_acc_to_zero(double acc,double v,
+                       double j/*jerk*/,double delta_v /* final-current*/
+    ,double delta_s) {
+
+  if(acc*delta_v<0)
+    return false;
+  j = (acc>0?-1:1)*fabs(j);
+  double delta_t = -acc/j;
+  double smallest_delta_v = j * delta_t * delta_t * 0.5 + acc * delta_t;
+  double smallest_delta_s =
+      j * delta_t * delta_t * delta_t / 6 + acc * delta_t * delta_t * 0.5
+          + v * delta_t;
+  if(delta_v>0) {
+    return delta_v < smallest_delta_v || delta_s < smallest_delta_s;
+  } else if (delta_v<0) {
+    return delta_v > smallest_delta_v ;
+  }
+}
+bool calc_params(double delta_d,
+                 double delta_sdot,
+                 double& kd,
+                 double& ks,
+                 double Td,
+                 double Ts) {
+  kd = 32 * delta_d / (Td * Td * Td);
+  ks = 4 * delta_sdot / (Ts * Ts);
+  double cur_max_jerk = sqrt(kd * kd + ks * ks);
+  double cur_max_acc_d = kd * Td / 4;
+  double cur_max_acc_s = ks * Ts / 2;
+  double cur_max_acc =
+      sqrt(cur_max_acc_d * cur_max_acc_d + cur_max_acc_s * cur_max_acc_s);
+  std::cout << " kd : " << kd << " ks : " << ks << " cur_max_acc_d : "
+            << cur_max_acc_d << " cur_max_acc_s " << cur_max_acc_s
+            << " cur_max_acc : " << cur_max_acc << " Ts : " << Ts << " Td : "
+            << Td << " delta_d : " << delta_d << " delta_sdot : " << std::endl;
+  return cur_max_jerk < max_jerk && cur_max_acc < max_acc;
+
+}
+
 
 int main() {
   uWS::Hub h;
@@ -374,7 +477,7 @@ int main() {
 
   int target_lane = 1;
   double ref_vel_mps = 0.0;
-  double ref_acc_mps2 = max_acc;
+  double ref_acc_mps2 = 0.0;
   vector<double> map_waypoints_x, map_waypoints_y, map_waypoints_s,
       map_waypoints_dx, map_waypoints_dy;
   // Waypoint map to read from
@@ -394,7 +497,17 @@ int main() {
     map_waypoints_dx.push_back(d_x);
     map_waypoints_dy.push_back(d_y);
   }
-  h.onMessage([&ref_vel_mps, &ref_acc_mps2, &map_waypoints_x, &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](
+  std::ofstream fout_wp("way_points.csv");
+  std::ofstream fout_calls("calls.csv");
+  std::ofstream fout_sf("sensor_fusion.csv");
+  fout_wp<<"wp_id,x,y,call_id,radius,theta,v,linear_acc,radial_acc,total_acc,j"<<std::endl;
+  fout_calls<<"call_id,prev_path_size,next_path_size,car_x,car_y,car_s,car_d,car_yaw,car_speed,end_path_s,end_path_d,end_path_x,end_path_y,num_cars_visible"<<std::endl;
+  fout_sf<<"call_id,car_id,x,y,vx,vy,s,d"<<std::endl;
+  int wp_id = 0;
+  int call_id = 0;
+  l4points l4p;
+  h.onMessage([&l4p,&fout_wp,&fout_calls,&fout_sf,&wp_id,&call_id,&ref_vel_mps, &ref_acc_mps2, &map_waypoints_x,
+               &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](
       uWS::WebSocket<uWS::SERVER> ws,
       char* data,
       size_t length,
@@ -425,133 +538,256 @@ int main() {
             modf(end_path_d / lane_width, &end_path_lane);
           else
             end_path_lane = car_lane;
+          /*
           std::cout << "prev_size : " << prev_size << " car_lane : " << car_lane
                     << " car_d : " << car_d << " end_path_d : " << end_path_d
                     << " end_path_lane : " << end_path_lane << std::endl;
-          double left_lane_id = end_path_lane - 1;
-          double right_lane_id = end_path_lane + 1;
-          std::vector<double> laneIds;
-          for (auto sf:sensor_fusion) {
-            if (sf[6] < 0)
-              break;
-            double curLaneId;
-            modf(double(sf[6]) / lane_width, &curLaneId);
-            laneIds.push_back(curLaneId);
-          }
-          if (prev_size > 0)
-            car_s = end_path_s;
-          double target_vel = max_vel;
-          bool left_lane_change_possible(false);
-          bool right_lane_change_possible(false);
-          bool current_lane_possible(false);
-          double left_s, right_s, same_s;
-          double left_v, right_v, same_v;
-          if (left_lane_id > -1) {
-            left_lane_change_possible = possibleToChange(left_lane_id,
-                                                         sensor_fusion,
-                                                         car_s,
-                                                         ref_vel_mps,
-                                                         prev_size * dt,
-                                                         left_s,
-                                                         left_v);
-          }
-          if (right_lane_id < 3) {
-            right_lane_change_possible = possibleToChange(right_lane_id,
-                                                          sensor_fusion,
-                                                          car_s,
-                                                          ref_vel_mps,
-                                                          prev_size * dt,
-                                                          right_s,
-                                                          right_v);
-          }
-          current_lane_possible = possibleToChange(end_path_lane,
-                                                   sensor_fusion,
-                                                   car_s,
-                                                   ref_vel_mps,
-                                                   prev_size * dt,
-                                                   same_s,
-                                                   same_v);
-          double best_lane_id = end_path_lane;
-          double best_speed = same_v;
-          if(left_lane_change_possible && left_v>best_speed) {
-            best_lane_id = left_lane_id;
-            best_speed = left_v;
-          }
-          if(right_lane_change_possible && right_v>best_speed) {
-            best_lane_id = right_lane_id;
-            best_speed = right_v;
-          }
-          std::cout<<"left : "<<left_lane_id<<" left_s : "<<left_s<<" left_v : "<<left_v<<std::endl;
-          std::cout<<"right : "<<right_lane_id<<" right_s : "<<right_s<<" right_v : "<<right_v<<std::endl;
-          std::cout<<" best_lane_id : "<<best_lane_id<<" end_path_lane : "<<end_path_lane<<" best_speed : "<<best_speed<<std::endl;
-          std::cout<<" left_possible : "<<left_lane_change_possible<<" right_possible : "<<right_lane_change_possible<<std::endl;
-          if (prev_size < 2) {
-            double prev_car_x = car_x - cos(car_yaw);
-            double prev_car_y = car_y - sin(car_yaw);
-            ptsx.insert(ptsx.end(), {prev_car_x, car_x});
-            ptsy.insert(ptsy.end(), {prev_car_y, car_y});
-          } else {
-            ref_x = previous_path_x[prev_size - 1];
-            ref_y = previous_path_y[prev_size - 1];
-            double ref_x_prev = previous_path_x[prev_size - 2];
-            double ref_y_prev = previous_path_y[prev_size - 2];
-            ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
-            ptsx.insert(ptsx.end(), {ref_x_prev, ref_x});
-            ptsy.insert(ptsy.end(), {ref_y_prev, ref_y});
-          }
-
-
-          double final_d = lane_width*(best_lane_id+0.5);
-          double final_s = car_s + (ref_vel_mps+best_speed)*0.5*time_horizon;
-
-          for(double alpha:{0.9,1.0}) {
-            auto nxt_pt = getXY(car_s*(1-alpha)+final_s*alpha,
-            car_d*(1-alpha)+final_d*alpha,
-            map_waypoints_s,map_waypoints_x,map_waypoints_y);
-            ptsx.push_back(nxt_pt[0]);
-            ptsy.push_back(nxt_pt[1]);
-          }
-          for (int i = 0; i < ptsx.size(); i++) {
-            double shift_x = ptsx[i] - ref_x;
-            double shift_y = ptsy[i] - ref_y;
-            ptsx[i] = (shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw));
-            ptsy[i] = (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw));
-          }
-          tk::spline s;
-          s.set_points(ptsx, ptsy);
+          */
           json msgJson;
           vector<double>
               next_x_vals(previous_path_x.begin(), previous_path_x.end()),
               next_y_vals(previous_path_y.begin(), previous_path_y.end());
-          double target_x = final_s;
-          double target_y = s(target_x);
-          double x_add_on = 0;
-          double time_left = time_horizon;
-          target_vel = best_speed;
-          for (int i = 1; i <= num_waypoints - previous_path_x.size(); i++) {
-            double desired_acc = (target_vel - ref_vel_mps) / time_left;
-            if (desired_acc > ref_acc_mps2 + max_acc_change_per_frame)
-              desired_acc = ref_acc_mps2 + max_acc_change_per_frame;
-            else if (desired_acc < ref_acc_mps2 - max_acc_change_per_frame)
-              desired_acc = ref_acc_mps2 - max_acc_change_per_frame;
-            if(desired_acc>max_acc)
-              desired_acc = max_acc;
-            else if (desired_acc<-max_acc)
-              desired_acc = -max_acc;
-            ref_acc_mps2 = desired_acc;
-            ref_vel_mps += ref_acc_mps2 * dt;
-            time_left -= dt;
-            double x_point = x_add_on + ref_vel_mps * dt;
-            double y_point = s(x_point);
-            x_add_on = x_point;
-            double x_ref = x_point;
-            double y_ref = y_point;
-            x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
-            y_point = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw);
-            x_point += ref_x;
-            y_point += ref_y;
-            next_x_vals.push_back(x_point);
-            next_y_vals.push_back(y_point);
+          if (prev_size < 50) {
+            double left_lane_id = end_path_lane - 1;
+            double right_lane_id = end_path_lane + 1;
+            std::vector<double> laneIds;
+            for (auto sf:sensor_fusion) {
+              if (sf[6] < 0)
+                break;
+              double curLaneId;
+              modf(double(sf[6]) / lane_width, &curLaneId);
+              laneIds.push_back(curLaneId);
+            }
+            if (prev_size > 0)
+              car_s = end_path_s;
+            double target_vel = max_vel;
+            bool left_lane_change_possible(false);
+            bool right_lane_change_possible(false);
+            bool current_lane_possible(false);
+            double left_s, right_s, same_s;
+            double left_v, right_v, same_v;
+            if (left_lane_id > -1) {
+              left_lane_change_possible = possibleToChange(left_lane_id,
+                                                           sensor_fusion,
+                                                           car_s,
+                                                           ref_vel_mps,
+                                                           prev_size * dt,
+                                                           left_s,
+                                                           left_v);
+            }
+            if (right_lane_id < 3) {
+              right_lane_change_possible = possibleToChange(right_lane_id,
+                                                            sensor_fusion,
+                                                            car_s,
+                                                            ref_vel_mps,
+                                                            prev_size * dt,
+                                                            right_s,
+                                                            right_v);
+            }
+            current_lane_possible = possibleToChange(end_path_lane,
+                                                     sensor_fusion,
+                                                     car_s,
+                                                     ref_vel_mps,
+                                                     prev_size * dt,
+                                                     same_s,
+                                                     same_v);
+            double best_lane_id = end_path_lane;
+            double best_speed = same_v;
+            double best_s = same_s;
+            if (left_lane_change_possible && left_v > best_speed) {
+              best_lane_id = left_lane_id;
+              best_speed = left_v;
+              best_s = left_s;
+            }
+            if (right_lane_change_possible && right_v > best_speed) {
+              best_lane_id = right_lane_id;
+              best_speed = right_v;
+              best_s = right_s;
+            }
+            /*
+            std::cout << "left : " << left_lane_id << " left_s : " << left_s
+                      << " left_v : " << left_v << std::endl;
+            std::cout << "right : " << right_lane_id << " right_s : " << right_s
+                      << " right_v : " << right_v << std::endl;
+            std::cout << " best_lane_id : " << best_lane_id
+                      << " end_path_lane : "
+                      << end_path_lane << " best_speed : " << best_speed
+                      << std::endl;
+            std::cout << " left_possible : " << left_lane_change_possible
+                      << " right_possible : " << right_lane_change_possible
+                      << std::endl;
+            */
+
+            if (true) {
+              if (prev_size < 2) {
+                double prev_car_x = car_x - cos(car_yaw);
+                double prev_car_y = car_y - sin(car_yaw);
+                ptsx.insert(ptsx.end(), {prev_car_x, car_x});
+                ptsy.insert(ptsy.end(), {prev_car_y, car_y});
+              } else {
+                ref_x = previous_path_x[prev_size - 1];
+                ref_y = previous_path_y[prev_size - 1];
+                double ref_x_prev = previous_path_x[prev_size - 2];
+                double ref_y_prev = previous_path_y[prev_size - 2];
+                ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+                ptsx.insert(ptsx.end(), {ref_x_prev, ref_x});
+                ptsy.insert(ptsy.end(), {ref_y_prev, ref_y});
+              }
+
+
+              double final_d = lane_width * (best_lane_id + 0.5);
+              double final_s =
+                  car_s + (ref_vel_mps + best_speed) * 0.5 * (time_horizon-dt*prev_size);
+
+              for (double alpha:{0.9, 1.0}) {
+                auto nxt_pt = getXY(car_s * (1 - alpha) + final_s * alpha,
+                                    car_d * (1 - alpha) + final_d * alpha,
+                                    map_waypoints_s,
+                                    map_waypoints_x,
+                                    map_waypoints_y);
+                ptsx.push_back(nxt_pt[0]);
+                ptsy.push_back(nxt_pt[1]);
+              }
+              for (int i = 0; i < ptsx.size(); i++) {
+                double shift_x = ptsx[i] - ref_x;
+                double shift_y = ptsy[i] - ref_y;
+                ptsx[i] =
+                    (shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw));
+                ptsy[i] =
+                    (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw));
+              }
+              tk::spline s;
+              s.set_points(ptsx, ptsy);
+              double target_x = final_s;
+              double target_y = s(target_x);
+              double x_add_on = 0;
+              double time_left = time_horizon-dt*prev_size;
+              target_vel = best_speed;
+              for (int i = 1; i <= num_waypoints - previous_path_x.size();
+                   i++) {
+                double desired_acc = (target_vel - ref_vel_mps) / time_left;
+                if (desired_acc > ref_acc_mps2 + max_acc_change_per_frame)
+                  desired_acc = ref_acc_mps2 + max_acc_change_per_frame;
+                else if (desired_acc < ref_acc_mps2 - max_acc_change_per_frame)
+                  desired_acc = ref_acc_mps2 - max_acc_change_per_frame;
+                if (desired_acc > max_acc)
+                  desired_acc = max_acc;
+                else if (desired_acc < -max_acc)
+                  desired_acc = -max_acc;
+                ref_acc_mps2 = desired_acc;
+                ref_vel_mps += ref_acc_mps2 * dt;
+                time_left -= dt;
+                double x_point = x_add_on + ref_vel_mps * dt;
+                double y_point = s(x_point);
+                x_add_on = x_point;
+                double x_ref = x_point;
+                double y_ref = y_point;
+                x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
+                y_point = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw);
+                x_point += ref_x;
+                y_point += ref_y;
+                next_x_vals.push_back(x_point);
+                next_y_vals.push_back(y_point);
+              }
+            } else if (false) {
+              double delta_d = lane_width * (best_lane_id - end_path_lane);
+              double delta_sdot = best_speed - ref_vel_mps;
+              double Td = time_horizon;
+              double kd;
+              double ks;
+              double Ts = time_horizon;
+              double v0 = ref_vel_mps;
+              double cur_s = end_path_s;
+              double prev_sdot = v0;
+              while (!calc_params(delta_d, delta_sdot, kd, ks, Td, Ts))
+                Ts *= 1.1;
+              std::cout << " best_speed : " << best_speed << " ref_vel_mps : "
+                        << ref_vel_mps << std::endl;
+              std::cout << " delta_d : " << delta_d << " delta_sdot : "
+                        << delta_sdot << " kd : " << kd << " ks : " << ks
+                        << " Td : " << Td << " Ts : " << Ts << std::endl;
+              for (double cur_dt = dt; cur_dt <= Td; cur_dt += dt) {
+                double cur_delta_d = calc_cur_delta_d(cur_dt, kd, Td);
+                double cur_sdot = vel_s(cur_dt, ks, Ts, v0);
+                cur_s += (prev_sdot + cur_sdot) * 0.5 * dt;
+                std::cout << " s : " << cur_s << " d : " << cur_delta_d
+                          << " cur_dt : " << cur_dt << " cur_sdot : "
+                          << cur_sdot << std::endl;
+                auto next_pt =
+                    getXY(cur_s, end_path_d + cur_delta_d, map_waypoints_s,
+                          map_waypoints_x, map_waypoints_y);
+                next_x_vals.push_back(next_pt[0]);
+                next_y_vals.push_back(next_pt[1]);
+                ref_vel_mps = cur_sdot;
+              }
+            } else if (false) {
+              double delta_d = lane_width * (best_lane_id - end_path_lane);
+              double Td = time_horizon;
+              double kd = calc_kd(delta_d, Td);
+              double ks = sqrt(max_jerk * max_jerk - kd * kd);
+              double max_acc_change = ks * dt;
+
+              for (double cur_dt = dt; cur_dt <= Td; cur_dt += dt) {
+                double cur_delta_d = calc_cur_delta_d(cur_dt, kd, Td);
+                double delta_sdot = best_speed - ref_vel_mps;
+                bool reduce_abs_acc = should_drive_acc_to_zero(ref_acc_mps2,delta_sdot,ks,delta_sdot,best_s-car_s);
+                if (reduce_abs_acc) {
+                  if(ref_acc_mps2>0) {
+                    ref_acc_mps2=max(0.0,ref_acc_mps2-max_acc_change);
+                  } else if (ref_acc_mps2<0) {
+                    ref_acc_mps2 = min(0.0,ref_acc_mps2+max_acc_change);
+                  }
+                } else if(delta_sdot > 0) {
+                  ref_acc_mps2 = std::min(ref_acc_mps2+max_acc_change,max_acc);
+                } else if(delta_sdot <0) {
+                  ref_acc_mps2 = std::max(ref_acc_mps2-max_acc_change,-max_acc);
+                }
+                ref_vel_mps = std::min(max_vel,ref_vel_mps+ref_acc_mps2 * dt);
+                car_s = advance_s(dt,car_s,ref_vel_mps);
+                auto next_pt = getXY(car_s,
+                                     car_d + cur_delta_d,
+                                     map_waypoints_s,
+                                     map_waypoints_x,
+                                     map_waypoints_y);
+                next_x_vals.push_back(next_pt[0]);
+                next_y_vals.push_back(next_pt[1]);
+              }
+            }
+          }
+          {
+            for(int nxt_id =  prev_size;nxt_id<next_x_vals.size();nxt_id++) {
+              l4p.addPoint(next_x_vals[nxt_id],next_y_vals[nxt_id]);
+              double a(sentinel),j(sentinel),v(sentinel),radius(sentinel),theta(sentinel),
+                  linear_acc(sentinel),radial_acc(sentinel);
+              if(l4p.n>=4){
+                radius = calc_radius(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
+                theta = calc_angle(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
+                linear_acc = calc_linear_acc(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
+                radial_acc = calc_radial_acc(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
+                v = calc_vel(l4p.x3,l4p.y3,l4p.x4,l4p.y4);
+                a = calc_acc(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
+                j = calc_jerk(l4p.x1,l4p.y1,l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
+              }
+              fout_wp<<wp_id<<","<<next_x_vals[nxt_id]<<","<<next_y_vals[nxt_id]<<","
+                     <<call_id<<","<<radius<<","<<theta<<","<<v<<","<<linear_acc<<","
+                     <<radial_acc <<","<<a<<","<<j<<std::endl;
+              wp_id+=1;
+            }
+            fout_wp<<std::flush;
+            int num_cars_visible = 0;
+            for(auto sf : sensor_fusion) {
+              double d(sf[6]);
+              if(d>=0.0 && d<=lane_width*3) {
+                fout_sf<<call_id<<","<<sf[0]<<","<<sf[1]<<","<<sf[2]<<","<<sf[3]<<","<<sf[4]<<","<<sf[5]<<","<<sf[6]<<std::endl;
+                num_cars_visible+=1;
+              }
+            }
+            auto end_pt = getXY(j[1]["end_path_s"],j[1]["end_path_d"],map_waypoints_s,map_waypoints_x,map_waypoints_y);
+            fout_calls<<call_id<<","<<prev_size<<","<<next_x_vals.size()<<","<<j[1]["x"]<<","<<j[1]["y"]<<","<<j[1]["s"]<<","
+                      <<j[1]["d"]<<","<<j[1]["yaw"]<<","<<j[1]["speed"]<<","<<j[1]["end_path_s"]<<","
+                      <<j[1]["end_path_d"]<<","<<end_pt[0]<<","<<end_pt[1]<<","<<num_cars_visible<<std::endl<<std::flush;
+            std::cout<<"call_id : "<<call_id<<" prev_size : "<<prev_size<<" next_size : "<<next_x_vals.size()<<std::endl;
+            call_id+=1;
           }
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
