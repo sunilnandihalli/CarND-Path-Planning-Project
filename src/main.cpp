@@ -689,69 +689,6 @@ int main() {
                 next_x_vals.push_back(x_point);
                 next_y_vals.push_back(y_point);
               }
-            } else if (false) {
-              double delta_d = lane_width * (best_lane_id - end_path_lane);
-              double delta_sdot = best_speed - ref_vel_mps;
-              double Td = time_horizon;
-              double kd;
-              double ks;
-              double Ts = time_horizon;
-              double v0 = ref_vel_mps;
-              double cur_s = end_path_s;
-              double prev_sdot = v0;
-              while (!calc_params(delta_d, delta_sdot, kd, ks, Td, Ts))
-                Ts *= 1.1;
-              std::cout << " best_speed : " << best_speed << " ref_vel_mps : "
-                        << ref_vel_mps << std::endl;
-              std::cout << " delta_d : " << delta_d << " delta_sdot : "
-                        << delta_sdot << " kd : " << kd << " ks : " << ks
-                        << " Td : " << Td << " Ts : " << Ts << std::endl;
-              for (double cur_dt = dt; cur_dt <= Td; cur_dt += dt) {
-                double cur_delta_d = calc_cur_delta_d(cur_dt, kd, Td);
-                double cur_sdot = vel_s(cur_dt, ks, Ts, v0);
-                cur_s += (prev_sdot + cur_sdot) * 0.5 * dt;
-                std::cout << " s : " << cur_s << " d : " << cur_delta_d
-                          << " cur_dt : " << cur_dt << " cur_sdot : "
-                          << cur_sdot << std::endl;
-                auto next_pt =
-                    getXY(cur_s, end_path_d + cur_delta_d, map_waypoints_s,
-                          map_waypoints_x, map_waypoints_y);
-                next_x_vals.push_back(next_pt[0]);
-                next_y_vals.push_back(next_pt[1]);
-                ref_vel_mps = cur_sdot;
-              }
-            } else if (false) {
-              double delta_d = lane_width * (best_lane_id - end_path_lane);
-              double Td = time_horizon;
-              double kd = calc_kd(delta_d, Td);
-              double ks = sqrt(max_jerk * max_jerk - kd * kd);
-              double max_acc_change = ks * dt;
-
-              for (double cur_dt = dt; cur_dt <= Td; cur_dt += dt) {
-                double cur_delta_d = calc_cur_delta_d(cur_dt, kd, Td);
-                double delta_sdot = best_speed - ref_vel_mps;
-                bool reduce_abs_acc = should_drive_acc_to_zero(ref_acc_mps2,delta_sdot,ks,delta_sdot,best_s-car_s);
-                if (reduce_abs_acc) {
-                  if(ref_acc_mps2>0) {
-                    ref_acc_mps2=max(0.0,ref_acc_mps2-max_acc_change);
-                  } else if (ref_acc_mps2<0) {
-                    ref_acc_mps2 = min(0.0,ref_acc_mps2+max_acc_change);
-                  }
-                } else if(delta_sdot > 0) {
-                  ref_acc_mps2 = std::min(ref_acc_mps2+max_acc_change,max_acc);
-                } else if(delta_sdot <0) {
-                  ref_acc_mps2 = std::max(ref_acc_mps2-max_acc_change,-max_acc);
-                }
-                ref_vel_mps = std::min(max_vel,ref_vel_mps+ref_acc_mps2 * dt);
-                car_s = advance_s(dt,car_s,ref_vel_mps);
-                auto next_pt = getXY(car_s,
-                                     car_d + cur_delta_d,
-                                     map_waypoints_s,
-                                     map_waypoints_x,
-                                     map_waypoints_y);
-                next_x_vals.push_back(next_pt[0]);
-                next_y_vals.push_back(next_pt[1]);
-              }
             }
           }
           {
