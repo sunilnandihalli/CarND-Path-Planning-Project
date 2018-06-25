@@ -201,7 +201,10 @@ double dist(double s1, double s2) {
   return ret;
 }
 
+double get_dist(double cur_vel,double
 
+                double get_jerk(double cur_acc,double cur_vel,double vmax,double vmin,double d) {
+}
 double
 rescind_s(double s, double ds) {
   s -= ds;
@@ -500,7 +503,7 @@ int main() {
   std::ofstream fout_wp("way_points.csv");
   std::ofstream fout_calls("calls.csv");
   std::ofstream fout_sf("sensor_fusion.csv");
-  fout_wp<<"wp_id,x,y,call_id,radius,theta,v,linear_acc,radial_acc,total_acc,j"<<std::endl;
+  fout_wp<<"wp_id,x,y,s,d,call_id,radius,theta,v,linear_acc,radial_acc,total_acc,j"<<std::endl;
   fout_calls<<"call_id,prev_path_size,next_path_size,car_x,car_y,car_s,car_d,car_yaw,car_speed,end_path_s,end_path_d,end_path_x,end_path_y,num_cars_visible"<<std::endl;
   fout_sf<<"call_id,car_id,x,y,vx,vy,s,d"<<std::endl;
   int wp_id = 0;
@@ -695,7 +698,7 @@ int main() {
             for(int nxt_id =  prev_size;nxt_id<next_x_vals.size();nxt_id++) {
               l4p.addPoint(next_x_vals[nxt_id],next_y_vals[nxt_id]);
               double a(sentinel),j(sentinel),v(sentinel),radius(sentinel),theta(sentinel),
-                  linear_acc(sentinel),radial_acc(sentinel);
+                  s(sentinel),d(sentinel), linear_acc(sentinel),radial_acc(sentinel);
               if(l4p.n>=4){
                 radius = calc_radius(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
                 theta = calc_angle(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
@@ -704,8 +707,12 @@ int main() {
                 v = calc_vel(l4p.x3,l4p.y3,l4p.x4,l4p.y4);
                 a = calc_acc(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
                 j = calc_jerk(l4p.x1,l4p.y1,l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
+                auto frn = getFrenet(next_x_vals[nxt_id],next_y_vals[nxt_id],atan2(l4p.y4-l4p.y3,l4p.x4-l4p.x3),map_waypoints_x,map_waypoints_y);
+                s=frn[0];
+                d=frn[1];
               }
-              fout_wp<<wp_id<<","<<next_x_vals[nxt_id]<<","<<next_y_vals[nxt_id]<<","
+
+              fout_wp<<wp_id<<","<<next_x_vals[nxt_id]<<","<<next_y_vals[nxt_id]<<","<<s<<","<<d<<","
                      <<call_id<<","<<radius<<","<<theta<<","<<v<<","<<linear_acc<<","
                      <<radial_acc <<","<<a<<","<<j<<std::endl;
               wp_id+=1;
