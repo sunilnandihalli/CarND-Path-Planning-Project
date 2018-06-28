@@ -36,9 +36,21 @@ vector<double> JMT(vector<double> start, vector<double> end, double T) {
 #include <cmath>
 #include <fstream>
 
-const double jmax = 10;
-const double amin = -10;
-const double amax = 10;
+const double max_s = 6945.554;
+const double mps2mph = 2.23694;
+const double dt = 0.02; // time between waypoints
+const double time_horizon = 3.0; // time horizon in seconds
+const int num_waypoints = time_horizon / dt;
+const double lane_width = 4.0;
+const double max_jerk = 5; // meters per sec^3
+const double max_acc = 5; // meters per sec^2
+const double max_vel_mph = 45;
+const double max_vel = max_vel_mph / mps2mph; // meters per sec
+const double max_acc_change_per_frame = max_jerk * dt;
+const double sentinel = 999999999;
+const double jmax = max_jerk;
+const double amin = -max_acc;
+const double amax = max_acc;
 
 double secant(const std::function<double(double)>& f,double min,double max,double tol,const char* call_name) {
   double x0(min),x1(max);
@@ -48,7 +60,7 @@ double secant(const std::function<double(double)>& f,double min,double max,doubl
     double xs = (f0*x1-f1*x0)/(f0-f1);
     double fs = f(xs);
     if(fabs(fs)<tol) {
-      std::cout<<call_name<<" xs "<<xs<<" fs "<<fs<<" x0 "<<x0<<" f0 "<<f0<<" x1 "<<x1<<" f1 "<<f1<<" return xs "<<std::endl;
+      //std::cout<<call_name<<" xs "<<xs<<" fs "<<fs<<" x0 "<<x0<<" f0 "<<f0<<" x1 "<<x1<<" f1 "<<f1<<" return xs "<<std::endl;
       return xs;
     } else {
       if(f0*fs<0) {
@@ -59,10 +71,10 @@ double secant(const std::function<double(double)>& f,double min,double max,doubl
         x0 = xs;
       } else {
         if(fabs(f0)<fabs(f1)) {
-	  std::cout<<call_name<<" xs "<<xs<<" fs "<<fs<<" x0 "<<x0<<" f0 "<<f0<<" x1 "<<x1<<" f1 "<<f1<<" return x0 "<<std::endl;
+	  //std::cout<<call_name<<" xs "<<xs<<" fs "<<fs<<" x0 "<<x0<<" f0 "<<f0<<" x1 "<<x1<<" f1 "<<f1<<" return x0 "<<std::endl;
 	  return x0;
         } else {
-	  std::cout<<call_name<<" xs "<<xs<<" fs "<<fs<<" x0 "<<x0<<" f0 "<<f0<<" x1 "<<x1<<" f1 "<<f1<<" return x1 "<<std::endl;
+	  //std::cout<<call_name<<" xs "<<xs<<" fs "<<fs<<" x0 "<<x0<<" f0 "<<f0<<" x1 "<<x1<<" f1 "<<f1<<" return x1 "<<std::endl;
           return x1;
 	}
       }
@@ -96,7 +108,7 @@ std::tuple<double,double,std::function<double(double)>,double> distDuringAccelCh
       static char buffer[1000];
       sprintf(buffer,"distDuringAccelChange : v0 %f a0 %f a1 %f returns dist %f velChange %f deltaT %f",v0,a0,a1,std::get<0>(x),
 	      std::get<1>(x),std::get<3>(x));
-      std::cout<<buffer<<std::endl;
+      //std::cout<<buffer<<std::endl;
       return x;
 }
 
@@ -157,7 +169,7 @@ std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange
       auto x = distDuringVelocityChangeH(a0,v0,v1);
       static char buffer[1000];
       sprintf(buffer,"distDuringVelocityChange : a0 %f v0 %f v1 %f returns dist %f totaltime %f",a0,v0,v1,std::get<0>(x),std::get<2>(x));
-      std::cout<<buffer<<std::endl;
+      //std::cout<<buffer<<std::endl;
       return x;
     }
 std::tuple<std::function<double(double)>,double> achieveZeroAcelAndVel(double a0,double v0,double vmin,double vmax,double delta_d) {
@@ -348,18 +360,6 @@ vector<double> getXY(double s,
   double y = seg_y + d * sin(perp_heading);
   return {x, y};
 }
-const double max_s = 6945.554;
-const double mps2mph = 2.23694;
-const double dt = 0.02; // time between waypoints
-const double time_horizon = 3.0; // time horizon in seconds
-const int num_waypoints = time_horizon / dt;
-const double lane_width = 4.0;
-const double max_jerk = 5; // meters per sec^3
-const double max_acc = 5; // meters per sec^2
-const double max_vel_mph = 45;
-const double max_vel = max_vel_mph / mps2mph; // meters per sec
-const double max_acc_change_per_frame = max_jerk * dt;
-const double sentinel = 999999999;
 bool
 double_equals(double d1, double d2, double tol = 1e-9) {
   double delta = d1 - d2;
@@ -421,310 +421,232 @@ possibleToChange(int laneId,
                  double& target_s,
                  double& target_vel) {
 
-  double nearest_car_front_s = sentinel;
-  double nearest_car_front_vel = 1000;
-  double nearest_car_back_s = sentinel;
-  double nearest_car_back_vel = 1000;
-  for (auto sf:sensor_fusion) {
-    double d = sf[6];
-    if (d < lane_width * (laneId + 1) && d > lane_width * laneId) {
-      double vx = sf[3];
-      double vy = sf[4];
-      double v = sqrt(vx * vx + vy * vy);
-      double s = sf[5];
-      s = advance_s(ref_dt, s, v);
-      if (dist(car_s, s) > 0) {
-        if (double_equals(nearest_car_front_s, sentinel)
-            || dist(nearest_car_front_s, s) < 0) {
-          nearest_car_front_s = s;
-          nearest_car_front_vel = v;
-        }
-      } else if (dist(car_s, s) < 0) {
-        if (double_equals(nearest_car_back_s, sentinel)
-            || dist(nearest_car_back_s, s) > 0) {
-          nearest_car_back_s = s;
-          nearest_car_back_vel = v;
-        }
-      }
-    }
-  }
-  // assuming 0 acceleration
-  double nearest_car_back_s_time_horizon =
-      advance_s(time_horizon, nearest_car_back_s, nearest_car_back_vel);
-  double nearest_car_front_s_time_horizon =
-      advance_s(time_horizon, nearest_car_front_s, nearest_car_front_vel);
-  bool no_vehicle_behind =
-      double_equals(nearest_car_back_s_time_horizon, sentinel);
-  bool no_vehicle_front =
-      double_equals(nearest_car_front_s_time_horizon, sentinel);
-  /*
-  std::cout << " lane_id : " << laneId
-            << " nearest_car_back_s : " << nearest_car_back_s << " v : "
-            << nearest_car_back_vel
-            << " car_s              : " << car_s << " v : " << car_v
-            << " nearest_car_front_s : " << nearest_car_front_s << " v : "
-            << nearest_car_front_vel << std::endl;
-  */
-  if (no_vehicle_behind && no_vehicle_front) {
-    target_s = advance_s(time_horizon, car_s, max_vel);
-    target_vel = max_vel;
-    return true;
-  } else if (no_vehicle_behind) {
-    if (dist(car_s, nearest_car_front_s) > 1.5 * lane_width) {
-      target_s = rescind_s(nearest_car_front_s_time_horizon, 1.5 * lane_width);
-      target_vel = std::min(max_vel, nearest_car_front_vel);
-      return true;
-    }
-  } else if (no_vehicle_front) {
-    if (dist(nearest_car_back_s, car_s) > 2 * lane_width) {
-      target_s = advance_s(nearest_car_back_s_time_horizon, 3 * lane_width);
-      target_vel = max_vel;
-      return true;
-    }
-  } else {
-    if ((dist(nearest_car_back_s_time_horizon, nearest_car_front_s_time_horizon)
-        > 4 * lane_width) &&
-        (dist(nearest_car_back_s, car_s) > 3 * lane_width) &&
-        (dist(car_s, nearest_car_front_s) > 1.5 * lane_width)) {
-      target_s = rescind_s(nearest_car_front_s_time_horizon, 1.5 * lane_width);
-      target_vel = std::min(max_vel, nearest_car_front_vel);
-      return true;
-    }
-  }
-  return false;
-}
-double calc_dist(double x1,double y1,double x2,double y2) {
-  double dx=x2-x1,dy=y2-y1;
-  return sqrt(dx*dx+dy*dy);
-}
-double calc_vel(double x1,double y1,double x2,double y2) {
-  return calc_dist(x1,y1,x2,y2)/dt;
-}
-double calc_angle(double x1,double y1,double x2 ,double y2 ,double x3,double y3){
-  double theta1 = atan2(x2-x1,y2-y1);
-  double theta2 = atan2(x3-x2,y3-y2);
-  return theta2-theta1;
-}
-double calc_omega(double x1,double y1,double x2 ,double y2 ,double x3,double y3){
-  return calc_angle(x1,y1,x2,y2,x3,y3)/dt;
-}
-double calc_radius(double x1,double y1,double x2,double y2,double x3,double y3) {
-  return calc_dist(x2,y2,x3,y3)/calc_angle(x1,y1,x2,y2,x3,y3);
-}
-double calc_linear_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
-  double v1 = calc_vel(x1,y1,x2,y2);
-  double v2 = calc_vel(x2,y2,x3,y3);
-  return (v2-v1)/dt;
-}
-double calc_radial_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
-  double v = calc_vel(x2,y2,x3,y3);
-  double r = calc_radius(x1,y1,x2,y2,x3,y3);
-  return v*v/r;
-}
-double calc_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
-  double al = calc_linear_acc(x1,y1,x2,y2,x3,y3);
-  double ar = calc_radial_acc(x1,y1,x2,y2,x3,y3);
-  return sqrt(al*al+ar*ar);
-}
-double calc_jerk(double x1,double y1,double x2,double y2,double x3,double y3,double x4,double y4) {
-  double a1 = calc_acc(x1,y1,x2,y2,x3,y3);
-  double a2 = calc_acc(x2,y2,x3,y3,x4,y4);
-  return (a2-a1)/dt;
-}
-struct l4points {
-  int n;
-  double x1,x2,x3,x4,y1,y2,y3,y4;
-  l4points() {
-    n = 0;
-    x1=x2=x3=x4=y1=y2=y3=y4=sentinel;
-  }
-  void addPoint(double x,double y) {
-    x1=x2;
-    x2=x3;
-    x3=x4;
-    x4=x;
-    y1=y2;
-    y2=y3;
-    y3=y4;
-    y4=y;
-    n+=1;
-  }
+   double nearest_car_front_s = sentinel;
+   double nearest_car_front_vel = 1000;
+   double nearest_car_back_s = sentinel;
+   double nearest_car_back_vel = 1000;
+   for (auto sf:sensor_fusion) {
+     double d = sf[6];
+     if (d < lane_width * (laneId + 1) && d > lane_width * laneId) {
+       double vx = sf[3];
+       double vy = sf[4];
+       double v = sqrt(vx * vx + vy * vy);
+       double s = sf[5];
+       s = advance_s(ref_dt, s, v);
+       if (dist(car_s, s) > 0) {
+         if (double_equals(nearest_car_front_s, sentinel)
+             || dist(nearest_car_front_s, s) < 0) {
+           nearest_car_front_s = s;
+           nearest_car_front_vel = v;
+         }
+       } else if (dist(car_s, s) < 0) {
+         if (double_equals(nearest_car_back_s, sentinel)
+             || dist(nearest_car_back_s, s) > 0) {
+           nearest_car_back_s = s;
+           nearest_car_back_vel = v;
+         }
+       }
+     }
+   }
+   // assuming 0 acceleration
+   double nearest_car_back_s_time_horizon =
+       advance_s(time_horizon, nearest_car_back_s, nearest_car_back_vel);
+   double nearest_car_front_s_time_horizon =
+       advance_s(time_horizon, nearest_car_front_s, nearest_car_front_vel);
+   bool no_vehicle_behind =
+       double_equals(nearest_car_back_s_time_horizon, sentinel);
+   bool no_vehicle_front =
+       double_equals(nearest_car_front_s_time_horizon, sentinel);
+   if (no_vehicle_behind && no_vehicle_front) {
+     target_s = advance_s(time_horizon, car_s, max_vel);
+     target_vel = max_vel;
+     return true;
+   } else if (no_vehicle_behind) {
+     if (dist(car_s, nearest_car_front_s) > 1.5 * lane_width) {
+       target_s = rescind_s(nearest_car_front_s_time_horizon, 1.5 * lane_width);
+       target_vel = std::min(max_vel, nearest_car_front_vel);
+       return true;
+     }
+   } else if (no_vehicle_front) {
+     if (dist(nearest_car_back_s, car_s) > 2 * lane_width) {
+       target_s = advance_s(nearest_car_back_s_time_horizon, 3 * lane_width);
+       target_vel = max_vel;
+       return true;
+     }
+   } else {
+     if ((dist(nearest_car_back_s_time_horizon, nearest_car_front_s_time_horizon)
+         > 4 * lane_width) &&
+         (dist(nearest_car_back_s, car_s) > 3 * lane_width) &&
+         (dist(car_s, nearest_car_front_s) > 1.5 * lane_width)) {
+       target_s = rescind_s(nearest_car_front_s_time_horizon, 1.5 * lane_width);
+       target_vel = std::min(max_vel, nearest_car_front_vel);
+       return true;
+     }
+   }
+   return false;
+ }
+ double calc_dist(double x1,double y1,double x2,double y2) {
+   double dx=x2-x1,dy=y2-y1;
+   return sqrt(dx*dx+dy*dy);
+ }
+ double calc_vel(double x1,double y1,double x2,double y2) {
+   return calc_dist(x1,y1,x2,y2)/dt;
+ }
+ double calc_angle(double x1,double y1,double x2 ,double y2 ,double x3,double y3){
+   double theta1 = atan2(x2-x1,y2-y1);
+   double theta2 = atan2(x3-x2,y3-y2);
+   return theta2-theta1;
+ }
+ double calc_omega(double x1,double y1,double x2 ,double y2 ,double x3,double y3){
+   return calc_angle(x1,y1,x2,y2,x3,y3)/dt;
+ }
+ double calc_radius(double x1,double y1,double x2,double y2,double x3,double y3) {
+   return calc_dist(x2,y2,x3,y3)/calc_angle(x1,y1,x2,y2,x3,y3);
+ }
+ double calc_linear_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
+   double v1 = calc_vel(x1,y1,x2,y2);
+   double v2 = calc_vel(x2,y2,x3,y3);
+   return (v2-v1)/dt;
+ }
+ double calc_radial_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
+   double v = calc_vel(x2,y2,x3,y3);
+   double r = calc_radius(x1,y1,x2,y2,x3,y3);
+   return v*v/r;
+ }
+ double calc_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
+   double al = calc_linear_acc(x1,y1,x2,y2,x3,y3);
+   double ar = calc_radial_acc(x1,y1,x2,y2,x3,y3);
+   return sqrt(al*al+ar*ar);
+ }
+ double calc_jerk(double x1,double y1,double x2,double y2,double x3,double y3,double x4,double y4) {
+   double a1 = calc_acc(x1,y1,x2,y2,x3,y3);
+   double a2 = calc_acc(x2,y2,x3,y3,x4,y4);
+   return (a2-a1)/dt;
+ }
+ struct l4points {
+   int n;
+   double x1,x2,x3,x4,y1,y2,y3,y4;
+   l4points() {
+     n = 0;
+     x1=x2=x3=x4=y1=y2=y3=y4=sentinel;
+   }
+   void addPoint(double x,double y) {
+     x1=x2;
+     x2=x3;
+     x3=x4;
+     x4=x;
+     y1=y2;
+     y2=y3;
+     y3=y4;
+     y4=y;
+     n+=1;
+   }
 
-};
-double jerk_s(double t, double k, double T) {
-  if (t < 0.5 * T)
-    return k;
-  else if (t <= T)
-    return -k;
-}
+ };
 
-double acc_s(double t, double k, double T) {
-  if (t < 0.5 * T)
-    return k * t;
-  else if (t <= T)
-    return k * (T - t);
-}
-
-double vel_s(double t, double k, double T, double v0) {
-  if (t < 0.5 * T)
-    return v0 + k * t * t * 0.5;
-  else if (t <= T)
-    return v0 + k * (T * t - t * t * 0.5 - T * T * 0.25);
-}
-
-double jerk_d(double t, double k, double T) {
-  if (t < 0.25 * T)
-    return k;
-  else if (t < 0.75 * T)
-    return -k;
-  else if (t < T)
-    return k;
-}
-
-double acc_d(double t, double k, double T) {
-  if (t < 0.25 * T)
-    return k * t;
-  else if (t < 0.75 * T)
-    return k * (0.5 * T - t);
-  else if (t < T)
-    return k * (t - T);
-}
-
-double vel_d(double t, double k, double T) {
-  if (t < 0.25 * T)
-    return k * t * t * 0.5;
-  else if (t < 0.75 * T)
-    return k * 0.5 * (T * t - t * t - T * T / 16);
-  else if (t < T)
-    return k * (t * t * 0.5 + T * T * 0.5 - t * T);
-}
-
-double calc_cur_delta_d(double t, double k, double T) {
-  if (t < 0.25 * T)
-    return k * t * t * t / 6;
-  else if (t < 0.75 * T)
-    return k * (T * t * t / 4 - t * t * t / 6 - T * T * t / 16
-        + T * T * T / (3 * 64));
-  else if (t < T)
-    return k * (-T * t * t / 2 + t * t * t / 6 + T * T * t / 2
-        - 26 * T * T * T / (3 * 64));
-}
-
-double calc_kd(double delta_d, double Td) {
-  return 32 * delta_d / (Td * Td * Td);
-}
-bool should_drive_acc_to_zero(double acc,double v,
-                       double j/*jerk*/,double delta_v /* final-current*/
-    ,double delta_s) {
-
-  if(acc*delta_v<0)
-    return false;
-  j = (acc>0?-1:1)*fabs(j);
-  double delta_t = -acc/j;
-  double smallest_delta_v = j * delta_t * delta_t * 0.5 + acc * delta_t;
-  double smallest_delta_s =
-      j * delta_t * delta_t * delta_t / 6 + acc * delta_t * delta_t * 0.5
-          + v * delta_t;
-  if(delta_v>0) {
-    return delta_v < smallest_delta_v || delta_s < smallest_delta_s;
-  } else if (delta_v<0) {
-    return delta_v > smallest_delta_v ;
-  }
-}
-bool calc_params(double delta_d,
-                 double delta_sdot,
-                 double& kd,
-                 double& ks,
-                 double Td,
-                 double Ts) {
-  kd = 32 * delta_d / (Td * Td * Td);
-  ks = 4 * delta_sdot / (Ts * Ts);
-  double cur_max_jerk = sqrt(kd * kd + ks * ks);
-  double cur_max_acc_d = kd * Td / 4;
-  double cur_max_acc_s = ks * Ts / 2;
-  double cur_max_acc =
-      sqrt(cur_max_acc_d * cur_max_acc_d + cur_max_acc_s * cur_max_acc_s);
-  std::cout << " kd : " << kd << " ks : " << ks << " cur_max_acc_d : "
-            << cur_max_acc_d << " cur_max_acc_s " << cur_max_acc_s
-            << " cur_max_acc : " << cur_max_acc << " Ts : " << Ts << " Td : "
-            << Td << " delta_d : " << delta_d << " delta_sdot : " << std::endl;
-  return cur_max_jerk < max_jerk && cur_max_acc < max_acc;
-
-}
+ enum DIRECTION { RIGHT,LEFT,SAME,NONE};
 
 
-int main() {
-  uWS::Hub h;
-  // Load up map values for waypoint's x,y,s and d normalized normal vectors
+ std::tuple<std::function<double(double)>,double,double,double,DIRECTION> jerkFuncForSafeFollowingDist(double a0,double v0,double s0,std::vector<std::tuple<double,double,DIRECTION>> carsAheadData) {
+   double tmax = -10;
+   // jfn,v1,delta_t,delta_d,Direction,
+   std::vector<std::tuple<std::function<double(double)>,double,double,double,DIRECTION>> carsAheadDataNew;
+   for(auto carAheadData : carsAheadData) {
+     double v1,s1;
+     DIRECTION dir;
+     std::tie(v1,s1,dir) = carAheadData;
+     double const safeTime = 1; //seconds
+     double const minDist = lane_width; //meters
+     double delta_d = s1-s0-minDist-v1*safeTime;
+     std::function<double(double)> jfn;
+     double delta_t;
+     std::tie(jfn,delta_t) = achieveZeroAcelAndVel(a0,v0-v1,-v1,max_vel-v1,delta_d);
+     carsAheadDataNew.push_back(std::make_tuple(jfn,v1,delta_t,delta_d,dir));
+     if(tmax<delta_t) {
+       tmax = delta_t;
+     }
+   }
+   auto h = [tmax](const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& x) {
+              double v1=std::get<1>(x);
+              double delta_d = std::get<3>(x);
+              return delta_d+v1*tmax;
+            };
+   auto cmp = [h,tmax](const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& a,const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& b) {
+                  return h(a)<h(b);
+                };
+   return *std::max_element(carsAheadDataNew.begin(),carsAheadDataNew.end(),cmp);
+ }
 
-  int target_lane = 1;
-  double ref_vel_mps = 0.0;
-  double ref_acc_mps2 = 0.0;
-  vector<double> map_waypoints_x, map_waypoints_y, map_waypoints_s,
-      map_waypoints_dx, map_waypoints_dy;
-  // Waypoint map to read from
-  string map_file_ = "../data/highway_map.csv";
-  // The max s value before wrapping around the track back to 0
 
-  ifstream in_map_(map_file_.c_str(), ifstream::in);
-  string line;
-  while (getline(in_map_, line)) {
-    istringstream iss(line);
-    double x, y;
-    float s, d_x, d_y;
-    iss >> x >> y >> s >> d_x >> d_y;
-    map_waypoints_x.push_back(x);
-    map_waypoints_y.push_back(y);
-    map_waypoints_s.push_back(s);
-    map_waypoints_dx.push_back(d_x);
-    map_waypoints_dy.push_back(d_y);
-  }
-  std::ofstream fout_wp("way_points.csv");
-  std::ofstream fout_calls("calls.csv");
-  std::ofstream fout_sf("sensor_fusion.csv");
-  fout_wp<<"wp_id,x,y,s,d,call_id,radius,theta,v,linear_acc,radial_acc,total_acc,j"<<std::endl;
-  fout_calls<<"call_id,prev_path_size,next_path_size,car_x,car_y,car_s,car_d,car_yaw,car_speed,end_path_s,end_path_d,end_path_x,end_path_y,num_cars_visible"<<std::endl;
-  fout_sf<<"call_id,car_id,x,y,vx,vy,s,d"<<std::endl;
-  int wp_id = 0;
-  int call_id = 0;
-  l4points l4p;
-  h.onMessage([&l4p,&fout_wp,&fout_calls,&fout_sf,&wp_id,&call_id,&ref_vel_mps, &ref_acc_mps2, &map_waypoints_x,
-               &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](
-      uWS::WebSocket<uWS::SERVER> ws,
-      char* data,
-      size_t length,
-      uWS::OpCode opCode) {
-    if (length && length > 2 && data[0] == '4' && data[1] == '2') {
-      auto s = hasData(data);
-      if (s != "") {
-        auto j = json::parse(s);
-        string event = j[0].get<string>();
-        if (event == "telemetry") {
-          // j[1] is the data JSON object
-          // Main car's localization Data
-          double car_x(j[1]["x"]), car_y(j[1]["y"]), car_s(j[1]["s"]),
-              car_d(j[1]["d"]), car_yaw(j[1]["yaw"]),
-              car_speed(j[1]["speed"]), end_path_s(j[1]["end_path_s"]),
-              end_path_d = j[1]["end_path_d"];
-          auto previous_path_x(j[1]["previous_path_x"]), previous_path_y
-              (j[1]["previous_path_y"]);// Previous path data given to the Planner
-          auto sensor_fusion = j[1]["sensor_fusion"];
-          double car_lane;
-          modf(car_d / lane_width, &car_lane);
+ int main() {
+   uWS::Hub h;
+   // Load up map values for waypoint's x,y,s and d normalized normal vectors
 
-          double ref_x(car_x), ref_y(car_y), ref_yaw(car_yaw);
-          vector<double> ptsx, ptsy;
-          auto prev_size = previous_path_x.size();
+   int target_lane = 1;
+   double ref_vel_mps = 0.0;
+   double ref_acc_mps2 = 0.0;
+   vector<double> map_waypoints_x, map_waypoints_y, map_waypoints_s,
+       map_waypoints_dx, map_waypoints_dy;
+   // Waypoint map to read from
+   string map_file_ = "../data/highway_map.csv";
+//    The max s value before wrapping around the track back to 0
+
+   ifstream in_map_(map_file_.c_str(), ifstream::in);
+   string line;
+   while (getline(in_map_, line)) {
+     istringstream iss(line);
+     double x, y;
+     float s, d_x, d_y;
+     iss >> x >> y >> s >> d_x >> d_y;
+     map_waypoints_x.push_back(x);
+     map_waypoints_y.push_back(y);
+     map_waypoints_s.push_back(s);
+     map_waypoints_dx.push_back(d_x);
+     map_waypoints_dy.push_back(d_y);
+   }
+   std::ofstream fout_wp("way_points.csv");
+   std::ofstream fout_calls("calls.csv");
+   std::ofstream fout_sf("sensor_fusion.csv");
+   fout_wp<<"wp_id,x,y,s,d,call_id,radius,theta,v,linear_acc,radial_acc,total_acc,j"<<std::endl;
+   fout_calls<<"call_id,prev_path_size,next_path_size,car_x,car_y,car_s,car_d,car_yaw,car_speed,end_path_s,end_path_d,end_path_x,end_path_y,num_cars_visible"<<std::endl;
+   fout_sf<<"call_id,car_id,x,y,vx,vy,s,d"<<std::endl;
+   int wp_id = 0;
+   int call_id = 0;
+   l4points l4p;
+   h.onMessage([&l4p,&fout_wp,&fout_calls,&fout_sf,&wp_id,&call_id,&ref_vel_mps, &ref_acc_mps2, &map_waypoints_x,
+                &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](
+       uWS::WebSocket<uWS::SERVER> ws,
+       char* data,
+       size_t length,
+       uWS::OpCode opCode) {
+     if (length && length > 2 && data[0] == '4' && data[1] == '2') {
+       auto s = hasData(data);
+       if (s != "") {
+         auto j = json::parse(s);
+         string event = j[0].get<string>();
+         if (event == "telemetry") {
+           //j[1] is the data JSON object
+           // Main car's localization Data
+           double car_x(j[1]["x"]), car_y(j[1]["y"]), car_s(j[1]["s"]),
+             car_d(j[1]["d"]), car_yaw(j[1]["yaw"]),
+
+               car_speed(j[1]["speed"]), end_path_s(j[1]["end_path_s"]),
+               end_path_d = j[1]["end_path_d"];
+           car_yaw *= 0.03490658503;
+           auto previous_path_x(j[1]["previous_path_x"]), previous_path_y
+               (j[1]["previous_path_y"]);// Previous path data given to the Planner
+           auto sensor_fusion = j[1]["sensor_fusion"];
+           double car_lane;
+           modf(car_d / lane_width, &car_lane);
+
+           double ref_x(car_x), ref_y(car_y), ref_yaw(car_yaw);
+           vector<double> ptsx, ptsy;
+           auto prev_size = previous_path_x.size();
           double end_path_lane;
           if (prev_size > 0)
             modf(end_path_d / lane_width, &end_path_lane);
           else
             end_path_lane = car_lane;
-          /*
-          std::cout << "prev_size : " << prev_size << " car_lane : " << car_lane
-                    << " car_d : " << car_d << " end_path_d : " << end_path_d
-                    << " end_path_lane : " << end_path_lane << std::endl;
-          */
           json msgJson;
           vector<double>
               next_x_vals(previous_path_x.begin(), previous_path_x.end()),
@@ -740,14 +662,17 @@ int main() {
               modf(double(sf[6]) / lane_width, &curLaneId);
               laneIds.push_back(curLaneId);
             }
-            if (prev_size > 0)
+            if (prev_size > 0) {
               car_s = end_path_s;
+              car_d = end_path_d;
+            }
             double target_vel = max_vel;
             bool left_lane_change_possible(false);
             bool right_lane_change_possible(false);
             bool current_lane_possible(false);
             double left_s, right_s, same_s;
             double left_v, right_v, same_v;
+            std::vector<std::tuple<double,double,DIRECTION>> carsAheadData;
             if (left_lane_id > -1) {
               left_lane_change_possible = possibleToChange(left_lane_id,
                                                            sensor_fusion,
@@ -756,6 +681,9 @@ int main() {
                                                            prev_size * dt,
                                                            left_s,
                                                            left_v);
+              if(left_lane_change_possible) {
+                carsAheadData.push_back(std::make_tuple(left_v,left_s,LEFT));
+              }
             }
             if (right_lane_id < 3) {
               right_lane_change_possible = possibleToChange(right_lane_id,
@@ -765,6 +693,9 @@ int main() {
                                                             prev_size * dt,
                                                             right_s,
                                                             right_v);
+              if(right_lane_change_possible) {
+                carsAheadData.push_back(std::make_tuple(right_v,right_s,RIGHT));
+              }
             }
             current_lane_possible = possibleToChange(end_path_lane,
                                                      sensor_fusion,
@@ -773,22 +704,30 @@ int main() {
                                                      prev_size * dt,
                                                      same_s,
                                                      same_v);
-            double best_lane_id = end_path_lane;
-            double best_speed = same_v;
-            double best_s = same_s;
-            if (left_lane_change_possible && left_v > best_speed) {
-              best_lane_id = left_lane_id;
-              best_speed = left_v;
-              best_s = left_s;
+            carsAheadData.push_back(std::make_tuple(same_v,same_s,SAME));
+            std::function<double(double)> jfn;
+
+            double delta_t;
+            double delta_d;
+            DIRECTION dir;
+            std::tie(jfn,target_vel,delta_t,delta_d,dir) = jerkFuncForSafeFollowingDist(ref_acc_mps2,ref_vel_mps,car_s,carsAheadData);
+            std::cout<<"carsAheadData Num values " <<carsAheadData.size()<< " right : "<<right_lane_change_possible<<" left : "<<left_lane_change_possible<<" current : "<<current_lane_possible<<std::endl;
+            std::cout<<" car_yaw : "<<car_yaw<<" ref_yaw : "<<ref_yaw<<" cos(ref_yaw) : "<<cos(ref_yaw)<<" cos(car_yaw) : "<<cos(car_yaw)<<std::endl;;
+            int best_lane_id;
+            switch(dir) {
+            case LEFT : if(!left_lane_change_possible) throw("left_lane_change_not possible");
+              best_lane_id = left_lane_id; break;
+            case RIGHT : if(!right_lane_change_possible) throw("right_lane_change_not possible");
+              best_lane_id = right_lane_id; break;
+            case SAME: best_lane_id = end_path_lane; break;
+            default : throw("error");
             }
-            if (right_lane_change_possible && right_v > best_speed) {
-              best_lane_id = right_lane_id;
-              best_speed = right_v;
-              best_s = right_s;
-            }
+
+            std::cout<<" best_lane_id : "<<best_lane_id <<" left_lane_id : "<<left_lane_id<<" right_lane_id : "<<right_lane_id<<" end_path_lane : "<<end_path_lane<<" end_path_d : "<<end_path_d<<std::endl;
 
             if (true) {
               if (prev_size < 2) {
+                std::cout<<"using returned car_yaw"<<std::endl;
                 double prev_car_x = car_x - cos(car_yaw);
                 double prev_car_y = car_y - sin(car_yaw);
                 ptsx.insert(ptsx.end(), {prev_car_x, car_x});
@@ -799,14 +738,20 @@ int main() {
                 double ref_x_prev = previous_path_x[prev_size - 2];
                 double ref_y_prev = previous_path_y[prev_size - 2];
                 ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
+                std::cout<<"calculated ref_yaw : "<<ref_yaw<<" car_yaw : "<<car_yaw<<std::endl;
                 ptsx.insert(ptsx.end(), {ref_x_prev, ref_x});
                 ptsy.insert(ptsy.end(), {ref_y_prev, ref_y});
               }
 
 
               double final_d = lane_width * (best_lane_id + 0.5);
-              double final_s =
-                  car_s + (ref_vel_mps + best_speed) * 0.5 * (time_horizon-dt*prev_size);
+              double final_s = car_s + delta_d + delta_t*target_vel;
+              std::cout<<"final_d : "<<final_d<<std::endl;
+              if(final_d>12) {
+                throw("final_d greater than 12");
+              } else if (final_d<0) {
+                throw("final_d is less than 0");
+              }
 
               for (double alpha:{0.9, 1.0}) {
                 auto nxt_pt = getXY(car_s * (1 - alpha) + final_s * alpha,
@@ -827,28 +772,18 @@ int main() {
               }
               tk::spline s;
               s.set_points(ptsx, ptsy);
-              double target_x = final_s;
-              double target_y = s(target_x);
-              double x_add_on = 0;
-              double time_left = time_horizon-dt*prev_size;
-              target_vel = best_speed;
+
+              double wps = 0;
+
+
               for (int i = 1; i <= num_waypoints - previous_path_x.size();
                    i++) {
-                double desired_acc = (target_vel - ref_vel_mps) / time_left;
-                if (desired_acc > ref_acc_mps2 + max_acc_change_per_frame)
-                  desired_acc = ref_acc_mps2 + max_acc_change_per_frame;
-                else if (desired_acc < ref_acc_mps2 - max_acc_change_per_frame)
-                  desired_acc = ref_acc_mps2 - max_acc_change_per_frame;
-                if (desired_acc > max_acc)
-                  desired_acc = max_acc;
-                else if (desired_acc < -max_acc)
-                  desired_acc = -max_acc;
-                ref_acc_mps2 = desired_acc;
+                double t = i*dt;
+                ref_acc_mps2 += jfn(t)*dt;
                 ref_vel_mps += ref_acc_mps2 * dt;
-                time_left -= dt;
-                double x_point = x_add_on + ref_vel_mps * dt;
+                wps += ref_vel_mps*dt;
+                double x_point = wps;
                 double y_point = s(x_point);
-                x_add_on = x_point;
                 double x_ref = x_point;
                 double y_ref = y_point;
                 x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
