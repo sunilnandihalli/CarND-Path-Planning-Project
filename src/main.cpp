@@ -10,6 +10,7 @@
 #include "json.hpp"
 #include "spline.h"
 using namespace std;
+#include <deque>
 #include <cmath>
 #include "Eigen-3.3/Eigen/Dense"
 using Eigen::MatrixXd;
@@ -35,7 +36,11 @@ vector<double> JMT(vector<double> start, vector<double> end, double T) {
 #include <functional>
 #include <cmath>
 #include <fstream>
+struct WP {
+  double x,xdot,xdotdot;
+};
 
+std::deque<WP> WPs,WPd;
 const double max_s = 6945.554;
 const double mps2mph = 2.23694;
 const double dt = 0.02; // time between waypoints
@@ -45,12 +50,12 @@ const double lane_width = 4.0;
 const double max_jerk = 5; // meters per sec^3
 const double max_acc = 5; // meters per sec^2
 const double max_vel_mph = 45;
-const double max_vel = max_vel_mph / mps2mph; // meters per sec
+
 const double max_acc_change_per_frame = max_jerk * dt;
 const double sentinel = 999999999;
-const double jmax = max_jerk;
-const double amin = -max_acc;
-const double amax = max_acc;
+double jmax = max_jerk;
+double amax = max_acc;
+double max_vel = max_vel_mph / mps2mph; // meters per sec
 
 double secant(const std::function<double(double)>& f,double min,double max,double tol,const char* call_name) {
   double x0(min),x1(max);
@@ -120,8 +125,8 @@ std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange
   auto direct = distDuringAccelChange(v0,a0,0);
   auto toAmax = distDuringAccelChange(v0,a0,amax);
   auto fromAmax = distDuringAccelChange(v0+std::get<1>(toAmax),amax,0);
-  auto toAmin = distDuringAccelChange(v0,a0,amin);
-  auto fromAmin = distDuringAccelChange(v0+std::get<1>(toAmin),amin,0);
+  auto toAmin = distDuringAccelChange(v0,a0,-amax);
+  auto fromAmin = distDuringAccelChange(v0+std::get<1>(toAmin),-amax,0);
   auto h = [v0,v1](std::tuple<double,double,std::function<double(double)>,double> to,
 						       std::tuple<double,double,std::function<double(double)>,double> from,
 											      double apeak) {
@@ -151,14 +156,14 @@ std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange
   } else if (std::get<1>(toAmax)+std::get<1>(fromAmax)<dv) {
     return h(toAmax,fromAmax,amax);
   } else if (std::get<1>(toAmin)+std::get<1>(fromAmin)>dv) {
-    return h(toAmin,fromAmin,amin);
+    return h(toAmin,fromAmin,-amax);
   } else {
     auto f = [a0,dv](double apeak) {
       return deltaVelocity(a0,apeak)+deltaVelocity(apeak,0)-dv;
     };
     static char buffer[1000];
     sprintf(buffer,"apeak : a0 %f v0 %f ",a0,v0);
-    double apeak = secant(f,amin,amax,1e-6,buffer);
+    double apeak = secant(f,-amax,amax,1e-6,buffer);
     auto toApeak = distDuringAccelChange(v0,a0,apeak);
     auto fromApeak = distDuringAccelChange(v0+std::get<1>(toApeak),apeak,0);
     return h(toApeak,fromApeak,apeak);
@@ -485,67 +490,8 @@ possibleToChange(int laneId,
    }
    return false;
  }
- double calc_dist(double x1,double y1,double x2,double y2) {
-   double dx=x2-x1,dy=y2-y1;
-   return sqrt(dx*dx+dy*dy);
- }
- double calc_vel(double x1,double y1,double x2,double y2) {
-   return calc_dist(x1,y1,x2,y2)/dt;
- }
- double calc_angle(double x1,double y1,double x2 ,double y2 ,double x3,double y3){
-   double theta1 = atan2(x2-x1,y2-y1);
-   double theta2 = atan2(x3-x2,y3-y2);
-   return theta2-theta1;
- }
- double calc_omega(double x1,double y1,double x2 ,double y2 ,double x3,double y3){
-   return calc_angle(x1,y1,x2,y2,x3,y3)/dt;
- }
- double calc_radius(double x1,double y1,double x2,double y2,double x3,double y3) {
-   return calc_dist(x2,y2,x3,y3)/calc_angle(x1,y1,x2,y2,x3,y3);
- }
- double calc_linear_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
-   double v1 = calc_vel(x1,y1,x2,y2);
-   double v2 = calc_vel(x2,y2,x3,y3);
-   return (v2-v1)/dt;
- }
- double calc_radial_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
-   double v = calc_vel(x2,y2,x3,y3);
-   double r = calc_radius(x1,y1,x2,y2,x3,y3);
-   return v*v/r;
- }
- double calc_acc(double x1,double y1,double x2,double y2,double x3,double y3) {
-   double al = calc_linear_acc(x1,y1,x2,y2,x3,y3);
-   double ar = calc_radial_acc(x1,y1,x2,y2,x3,y3);
-   return sqrt(al*al+ar*ar);
- }
- double calc_jerk(double x1,double y1,double x2,double y2,double x3,double y3,double x4,double y4) {
-   double a1 = calc_acc(x1,y1,x2,y2,x3,y3);
-   double a2 = calc_acc(x2,y2,x3,y3,x4,y4);
-   return (a2-a1)/dt;
- }
- struct l4points {
-   int n;
-   double x1,x2,x3,x4,y1,y2,y3,y4;
-   l4points() {
-     n = 0;
-     x1=x2=x3=x4=y1=y2=y3=y4=sentinel;
-   }
-   void addPoint(double x,double y) {
-     x1=x2;
-     x2=x3;
-     x3=x4;
-     x4=x;
-     y1=y2;
-     y2=y3;
-     y3=y4;
-     y4=y;
-     n+=1;
-   }
-
- };
 
  enum DIRECTION { RIGHT,LEFT,SAME,NONE};
-
 
  std::tuple<std::function<double(double)>,double,double,double,DIRECTION> jerkFuncForSafeFollowingDist(double a0,double v0,double s0,std::vector<std::tuple<double,double,DIRECTION>> carsAheadData) {
    double tmax = -10;
@@ -578,19 +524,11 @@ possibleToChange(int laneId,
  }
 
 
- int main() {
-   uWS::Hub h;
-   // Load up map values for waypoint's x,y,s and d normalized normal vectors
 
-   int target_lane = 1;
-   double ref_vel_mps = 0.0;
-   double ref_acc_mps2 = 0.0;
-   vector<double> map_waypoints_x, map_waypoints_y, map_waypoints_s,
-       map_waypoints_dx, map_waypoints_dy;
-   // Waypoint map to read from
+vector<double> map_waypoints_x, map_waypoints_y, map_waypoints_s,map_waypoints_dx, map_waypoints_dy;
+
+void read_map() {
    string map_file_ = "../data/highway_map.csv";
-//    The max s value before wrapping around the track back to 0
-
    ifstream in_map_(map_file_.c_str(), ifstream::in);
    string line;
    while (getline(in_map_, line)) {
@@ -604,17 +542,12 @@ possibleToChange(int laneId,
      map_waypoints_dx.push_back(d_x);
      map_waypoints_dy.push_back(d_y);
    }
-   std::ofstream fout_wp("way_points.csv");
-   std::ofstream fout_calls("calls.csv");
-   std::ofstream fout_sf("sensor_fusion.csv");
-   fout_wp<<"wp_id,x,y,s,d,call_id,radius,theta,v,linear_acc,radial_acc,total_acc,j"<<std::endl;
-   fout_calls<<"call_id,prev_path_size,next_path_size,car_x,car_y,car_s,car_d,car_yaw,car_speed,end_path_s,end_path_d,end_path_x,end_path_y,num_cars_visible"<<std::endl;
-   fout_sf<<"call_id,car_id,x,y,vx,vy,s,d"<<std::endl;
-   int wp_id = 0;
-   int call_id = 0;
-   l4points l4p;
-   h.onMessage([&l4p,&fout_wp,&fout_calls,&fout_sf,&wp_id,&call_id,&ref_vel_mps, &ref_acc_mps2, &map_waypoints_x,
-                &map_waypoints_y, &map_waypoints_s, &map_waypoints_dx, &map_waypoints_dy](
+}
+
+ int main() {
+   read_map();
+   uWS::Hub h;
+   h.onMessage([](
        uWS::WebSocket<uWS::SERVER> ws,
        char* data,
        size_t length,
@@ -625,22 +558,14 @@ possibleToChange(int laneId,
          auto j = json::parse(s);
          string event = j[0].get<string>();
          if (event == "telemetry") {
-           //j[1] is the data JSON object
-           // Main car's localization Data
-           double car_x(j[1]["x"]), car_y(j[1]["y"]), car_s(j[1]["s"]),
-             car_d(j[1]["d"]), car_yaw(j[1]["yaw"]),
-
-               car_speed(j[1]["speed"]), end_path_s(j[1]["end_path_s"]),
-               end_path_d = j[1]["end_path_d"];
+           double car_x(j[1]["x"]), car_y(j[1]["y"]), car_s(j[1]["s"]), car_d(j[1]["d"]), car_yaw(j[1]["yaw"]),
+               car_speed(j[1]["speed"]), end_path_s(j[1]["end_path_s"]), end_path_d = j[1]["end_path_d"];
            car_yaw *= 0.03490658503;
-           auto previous_path_x(j[1]["previous_path_x"]), previous_path_y
-               (j[1]["previous_path_y"]);// Previous path data given to the Planner
+           auto previous_path_x(j[1]["previous_path_x"]), previous_path_y(j[1]["previous_path_y"]);
            auto sensor_fusion = j[1]["sensor_fusion"];
            double car_lane;
            modf(car_d / lane_width, &car_lane);
-
            double ref_x(car_x), ref_y(car_y), ref_yaw(car_yaw);
-           vector<double> ptsx, ptsy;
            auto prev_size = previous_path_x.size();
           double end_path_lane;
           if (prev_size > 0)
@@ -657,7 +582,7 @@ possibleToChange(int laneId,
             std::vector<double> laneIds;
             for (auto sf:sensor_fusion) {
               if (sf[6] < 0)
-                break;
+                continue;
               double curLaneId;
               modf(double(sf[6]) / lane_width, &curLaneId);
               laneIds.push_back(curLaneId);
@@ -711,8 +636,7 @@ possibleToChange(int laneId,
             double delta_d;
             DIRECTION dir;
             std::tie(jfn,target_vel,delta_t,delta_d,dir) = jerkFuncForSafeFollowingDist(ref_acc_mps2,ref_vel_mps,car_s,carsAheadData);
-            std::cout<<"carsAheadData Num values " <<carsAheadData.size()<< " right : "<<right_lane_change_possible<<" left : "<<left_lane_change_possible<<" current : "<<current_lane_possible<<std::endl;
-            std::cout<<" car_yaw : "<<car_yaw<<" ref_yaw : "<<ref_yaw<<" cos(ref_yaw) : "<<cos(ref_yaw)<<" cos(car_yaw) : "<<cos(car_yaw)<<std::endl;;
+
             int best_lane_id;
             switch(dir) {
             case LEFT : if(!left_lane_change_possible) throw("left_lane_change_not possible");
@@ -723,116 +647,11 @@ possibleToChange(int laneId,
             default : throw("error");
             }
 
-            std::cout<<" best_lane_id : "<<best_lane_id <<" left_lane_id : "<<left_lane_id<<" right_lane_id : "<<right_lane_id<<" end_path_lane : "<<end_path_lane<<" end_path_d : "<<end_path_d<<std::endl;
-
-            if (true) {
-              if (prev_size < 2) {
-                std::cout<<"using returned car_yaw"<<std::endl;
-                double prev_car_x = car_x - cos(car_yaw);
-                double prev_car_y = car_y - sin(car_yaw);
-                ptsx.insert(ptsx.end(), {prev_car_x, car_x});
-                ptsy.insert(ptsy.end(), {prev_car_y, car_y});
-              } else {
-                ref_x = previous_path_x[prev_size - 1];
-                ref_y = previous_path_y[prev_size - 1];
-                double ref_x_prev = previous_path_x[prev_size - 2];
-                double ref_y_prev = previous_path_y[prev_size - 2];
-                ref_yaw = atan2(ref_y - ref_y_prev, ref_x - ref_x_prev);
-                std::cout<<"calculated ref_yaw : "<<ref_yaw<<" car_yaw : "<<car_yaw<<std::endl;
-                ptsx.insert(ptsx.end(), {ref_x_prev, ref_x});
-                ptsy.insert(ptsy.end(), {ref_y_prev, ref_y});
-              }
-
-
-              double final_d = lane_width * (best_lane_id + 0.5);
-              double final_s = car_s + delta_d + delta_t*target_vel;
-              std::cout<<"final_d : "<<final_d<<std::endl;
-              if(final_d>12) {
-                throw("final_d greater than 12");
-              } else if (final_d<0) {
-                throw("final_d is less than 0");
-              }
-
-              for (double alpha:{0.9, 1.0}) {
-                auto nxt_pt = getXY(car_s * (1 - alpha) + final_s * alpha,
-                                    car_d * (1 - alpha) + final_d * alpha,
-                                    map_waypoints_s,
-                                    map_waypoints_x,
-                                    map_waypoints_y);
-                ptsx.push_back(nxt_pt[0]);
-                ptsy.push_back(nxt_pt[1]);
-              }
-              for (int i = 0; i < ptsx.size(); i++) {
-                double shift_x = ptsx[i] - ref_x;
-                double shift_y = ptsy[i] - ref_y;
-                ptsx[i] =
-                    (shift_x * cos(0 - ref_yaw) - shift_y * sin(0 - ref_yaw));
-                ptsy[i] =
-                    (shift_x * sin(0 - ref_yaw) + shift_y * cos(0 - ref_yaw));
-              }
-              tk::spline s;
-              s.set_points(ptsx, ptsy);
-
-              double wps = 0;
-
-
-              for (int i = 1; i <= num_waypoints - previous_path_x.size();
-                   i++) {
-                double t = i*dt;
-                ref_acc_mps2 += jfn(t)*dt;
-                ref_vel_mps += ref_acc_mps2 * dt;
-                wps += ref_vel_mps*dt;
-                double x_point = wps;
-                double y_point = s(x_point);
-                double x_ref = x_point;
-                double y_ref = y_point;
-                x_point = x_ref * cos(ref_yaw) - y_ref * sin(ref_yaw);
-                y_point = x_ref * sin(ref_yaw) + y_ref * cos(ref_yaw);
-                x_point += ref_x;
-                y_point += ref_y;
-                next_x_vals.push_back(x_point);
-                next_y_vals.push_back(y_point);
+            {
+              for(int i=prev_size;i<num_waypoints;i++) {
+              auto nxt_pt = getXY(0,0,map_waypoints_s, map_waypoints_x, map_waypoints_y);
               }
             }
-          }
-          {
-            for(int nxt_id =  prev_size;nxt_id<next_x_vals.size();nxt_id++) {
-              l4p.addPoint(next_x_vals[nxt_id],next_y_vals[nxt_id]);
-              double a(sentinel),j(sentinel),v(sentinel),radius(sentinel),theta(sentinel),
-                  s(sentinel),d(sentinel), linear_acc(sentinel),radial_acc(sentinel);
-              if(l4p.n>=4){
-                radius = calc_radius(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
-                theta = calc_angle(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
-                linear_acc = calc_linear_acc(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
-                radial_acc = calc_radial_acc(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
-                v = calc_vel(l4p.x3,l4p.y3,l4p.x4,l4p.y4);
-                a = calc_acc(l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
-                j = calc_jerk(l4p.x1,l4p.y1,l4p.x2,l4p.y2,l4p.x3,l4p.y3,l4p.x4,l4p.y4);
-                auto frn = getFrenet(next_x_vals[nxt_id],next_y_vals[nxt_id],atan2(l4p.y4-l4p.y3,l4p.x4-l4p.x3),map_waypoints_x,map_waypoints_y);
-                s=frn[0];
-                d=frn[1];
-              }
-
-              fout_wp<<wp_id<<","<<next_x_vals[nxt_id]<<","<<next_y_vals[nxt_id]<<","<<s<<","<<d<<","
-                     <<call_id<<","<<radius<<","<<theta<<","<<v<<","<<linear_acc<<","
-                     <<radial_acc <<","<<a<<","<<j<<std::endl;
-              wp_id+=1;
-            }
-            fout_wp<<std::flush;
-            int num_cars_visible = 0;
-            for(auto sf : sensor_fusion) {
-              double d(sf[6]);
-              if(d>=0.0 && d<=lane_width*3) {
-                fout_sf<<call_id<<","<<sf[0]<<","<<sf[1]<<","<<sf[2]<<","<<sf[3]<<","<<sf[4]<<","<<sf[5]<<","<<sf[6]<<std::endl;
-                num_cars_visible+=1;
-              }
-            }
-            auto end_pt = getXY(j[1]["end_path_s"],j[1]["end_path_d"],map_waypoints_s,map_waypoints_x,map_waypoints_y);
-            fout_calls<<call_id<<","<<prev_size<<","<<next_x_vals.size()<<","<<j[1]["x"]<<","<<j[1]["y"]<<","<<j[1]["s"]<<","
-                      <<j[1]["d"]<<","<<j[1]["yaw"]<<","<<j[1]["speed"]<<","<<j[1]["end_path_s"]<<","
-                      <<j[1]["end_path_d"]<<","<<end_pt[0]<<","<<end_pt[1]<<","<<num_cars_visible<<std::endl<<std::flush;
-            std::cout<<"call_id : "<<call_id<<" prev_size : "<<prev_size<<" next_size : "<<next_x_vals.size()<<std::endl;
-            call_id+=1;
           }
           msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
