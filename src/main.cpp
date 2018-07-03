@@ -53,9 +53,15 @@ const double max_vel_mph = 45;
 
 const double max_acc_change_per_frame = max_jerk * dt;
 const double sentinel = 999999999;
-double jmax = max_jerk;
-double amax = max_acc;
-double max_vel = max_vel_mph / mps2mph; // meters per sec
+//double jmax = max_jerk;
+//double amax = max_acc;
+const double max_vel = max_vel_mph / mps2mph; // meters per sec
+const double lcd_jmax = 5.0;
+const double lcd_amax = 3.0;
+const double lcd_vmax = 3.0;
+const double d_jmax = 1.0;
+const double d_amax = 1.0;
+const double d_vmax = 1.0;
 
 double secant(const std::function<double(double)>& f,double min,double max,double tol,const char* call_name) {
   double x0(min),x1(max);
@@ -89,7 +95,7 @@ double secant(const std::function<double(double)>& f,double min,double max,doubl
 
 // assuming maximum jerk is constant
 // minimum velocity change when changing acceleration
-double deltaVelocity(double a0,double a1) {
+double deltaVelocity(double a0,double a1,double jmax) {
   return (a0+a1)*0.5*fabs(a1-a0)/jmax;
 }
 
@@ -99,17 +105,17 @@ double dist(double v,double a,double j,double t) {
 }
 
 // returns <distChange,velChange,jerk_fn,time>
-std::tuple<double,double,std::function<double(double)>,double> distDuringAccelChangeH(double v0,double a0,double a1) {
+std::tuple<double,double,std::function<double(double)>,double> distDuringAccelChangeH(double v0,double a0,double a1,double jmax) {
   double j = (a1>a0?1:-1)*jmax;
   double t1 = (a1-a0)/j;
   double d = dist(v0,a0,j,t1);
-  double dv = deltaVelocity(a0,a1);
+  double dv = deltaVelocity(a0,a1,jmax);
   auto jfn = [t1,j](double t) { if(t>=0 && t<=t1) return j;};
   return std::make_tuple(d,dv,jfn,t1);
 }
 
-std::tuple<double,double,std::function<double(double)>,double> distDuringAccelChange(double v0,double a0,double a1) {
-      auto x = distDuringAccelChangeH(v0,a0,a1);
+std::tuple<double,double,std::function<double(double)>,double> distDuringAccelChange(double v0,double a0,double a1,double jmax) {
+  auto x = distDuringAccelChangeH(v0,a0,a1,jmax);
       static char buffer[1000];
       sprintf(buffer,"distDuringAccelChange : v0 %f a0 %f a1 %f returns dist %f velChange %f deltaT %f",v0,a0,a1,std::get<0>(x),
 	      std::get<1>(x),std::get<3>(x));
@@ -119,14 +125,14 @@ std::tuple<double,double,std::function<double(double)>,double> distDuringAccelCh
 
 
 // dist,jfn,totaltime
-std::tuple<double,std::function<double(double)>,double> distDuringVelocityChangeH(double a0,double v0,double v1) {
+std::tuple<double,std::function<double(double)>,double> distDuringVelocityChangeH(double a0,double v0,double v1,double jmax,double amax) {
   double dv = v1-v0;
   // change in velocities
-  auto direct = distDuringAccelChange(v0,a0,0);
-  auto toAmax = distDuringAccelChange(v0,a0,amax);
-  auto fromAmax = distDuringAccelChange(v0+std::get<1>(toAmax),amax,0);
-  auto toAmin = distDuringAccelChange(v0,a0,-amax);
-  auto fromAmin = distDuringAccelChange(v0+std::get<1>(toAmin),-amax,0);
+  auto direct = distDuringAccelChange(v0,a0,0,jmax);
+  auto toAmax = distDuringAccelChange(v0,a0,amax,jmax);
+  auto fromAmax = distDuringAccelChange(v0+std::get<1>(toAmax),amax,0,jmax);
+  auto toAmin = distDuringAccelChange(v0,a0,-amax,jmax);
+  auto fromAmin = distDuringAccelChange(v0+std::get<1>(toAmin),-amax,0,jmax);
   auto h = [v0,v1](std::tuple<double,double,std::function<double(double)>,double> to,
 						       std::tuple<double,double,std::function<double(double)>,double> from,
 											      double apeak) {
@@ -143,6 +149,8 @@ std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange
 	return 0.0;
       } else if (t<=t1+t2+t3) {
 	return jfn3(t-t1-t2);
+      } else {
+	return 0.0;
       }
     };
     if(t2>=0) {
@@ -158,31 +166,31 @@ std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange
   } else if (std::get<1>(toAmin)+std::get<1>(fromAmin)>dv) {
     return h(toAmin,fromAmin,-amax);
   } else {
-    auto f = [a0,dv](double apeak) {
-      return deltaVelocity(a0,apeak)+deltaVelocity(apeak,0)-dv;
+    auto f = [a0,dv,jmax](double apeak) {
+      return deltaVelocity(a0,apeak,jmax)+deltaVelocity(apeak,0,jmax)-dv;
     };
     static char buffer[1000];
     sprintf(buffer,"apeak : a0 %f v0 %f ",a0,v0);
     double apeak = secant(f,-amax,amax,1e-6,buffer);
-    auto toApeak = distDuringAccelChange(v0,a0,apeak);
-    auto fromApeak = distDuringAccelChange(v0+std::get<1>(toApeak),apeak,0);
+    auto toApeak = distDuringAccelChange(v0,a0,apeak,jmax);
+    auto fromApeak = distDuringAccelChange(v0+std::get<1>(toApeak),apeak,0,jmax);
     return h(toApeak,fromApeak,apeak);
   }
 }
 // dist,jfn,totaltime
-std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange(double a0,double v0,double v1) {
-      auto x = distDuringVelocityChangeH(a0,v0,v1);
+std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange(double a0,double v0,double v1,double jmax,double amax) {
+  auto x = distDuringVelocityChangeH(a0,v0,v1,jmax,amax);
       static char buffer[1000];
       sprintf(buffer,"distDuringVelocityChange : a0 %f v0 %f v1 %f returns dist %f totaltime %f",a0,v0,v1,std::get<0>(x),std::get<2>(x));
       //std::cout<<buffer<<std::endl;
       return x;
     }
-std::tuple<std::function<double(double)>,double> achieveZeroAcelAndVel(double a0,double v0,double vmin,double vmax,double delta_d) {
-  auto direct = distDuringVelocityChange(a0,v0,0);
-  auto toVmin = distDuringVelocityChange(a0,v0,vmin);
-  auto fromVmin = distDuringVelocityChange(0,vmin,0);
-  auto toVmax = distDuringVelocityChange(a0,v0,vmax);
-  auto fromVmax = distDuringVelocityChange(0,vmax,0);
+std::tuple<std::function<double(double)>,double> achieveZeroAcelAndVel(double a0,double v0,double vmin,double vmax,double delta_d,double amax,double jmax) {
+  auto direct = distDuringVelocityChange(a0,v0,0,jmax,amax);
+  auto toVmin = distDuringVelocityChange(a0,v0,vmin,jmax,amax);
+  auto fromVmin = distDuringVelocityChange(0,vmin,0,jmax,amax);
+  auto toVmax = distDuringVelocityChange(a0,v0,vmax,jmax,amax);
+  auto fromVmax = distDuringVelocityChange(0,vmax,0,jmax,amax);
   double directDist = std::get<0>(direct);
   double vminDist = std::get<0>(toVmin)+std::get<0>(fromVmin);
   double vmaxDist = std::get<0>(toVmax)+std::get<0>(fromVmax);
@@ -202,6 +210,8 @@ std::tuple<std::function<double(double)>,double> achieveZeroAcelAndVel(double a0
 	return 0.0;
       } else if (t<=t1+t2+t3) {
 	return jfn3(t-t1-t2);
+      } else {
+	return 0.0;
       }
     };
     return std::make_tuple(jfn,t1+t2+t3);
@@ -221,14 +231,14 @@ std::tuple<std::function<double(double)>,double> achieveZeroAcelAndVel(double a0
       throw("should not come here");
     }
   } else {
-    auto f = [a0,v0,delta_d](double vpeak) {
-      return std::get<0>(distDuringVelocityChange(a0,v0,vpeak))+std::get<0>(distDuringVelocityChange(0,vpeak,0))-delta_d;
+    auto f = [a0,v0,delta_d,jmax,amax](double vpeak) {
+      return std::get<0>(distDuringVelocityChange(a0,v0,vpeak,jmax,amax))+std::get<0>(distDuringVelocityChange(0,vpeak,0,jmax,amax))-delta_d;
     };
     static char buffer[1000];
     sprintf(buffer,"peakVel a0 %f v0 %f delta_d %f",a0,v0,delta_d);
     double vpeak = secant(f,vmin,vmax,1e-5,buffer);
-    auto toVpeak = distDuringVelocityChange(a0,v0,vpeak);
-    auto fromVpeak = distDuringVelocityChange(0,vpeak,0);
+    auto toVpeak = distDuringVelocityChange(a0,v0,vpeak,jmax,amax);
+    auto fromVpeak = distDuringVelocityChange(0,vpeak,0,jmax,amax);
     return h(toVpeak,fromVpeak,vpeak);
   }
 }
@@ -376,7 +386,7 @@ void createWayPoints(std::function<double(double)> s1_jfn,std::function<double(d
   typedef std::function<std::tuple<double,double>(double)> T;
   auto pd = [&maps_x,&maps_y](int i1,int i2) {
     double x1(maps_x[i1]),y1(maps_y[i1]),x2(maps_x[i2]),y2(maps_y[i2]);
-    double h = atan2(y2-y1,x2,x1);
+    double h = atan2(y2-y1,x2-x1);
     double ph = h - pi()/2;
     double cos_ph = cos(ph);
     double sin_ph = sin(ph);
@@ -412,7 +422,7 @@ void createWayPoints(std::function<double(double)> s1_jfn,std::function<double(d
       auto cwp = wp.back();
       WayPoint nwp;
       nwp.s_a = cwp.s_a + (s1_jfn(t-dt)+s1_jfn(t))*0.5*dt/cwp.ds1ds;
-      nwp.s_v = cwp.s_v + (cwp.s_a+nwp.x_a)*0.5*dt;
+      nwp.s_v = cwp.s_v + (cwp.s_a+nwp.s_a)*0.5*dt;
       nwp.s = cwp.s + (cwp.s_v+nwp.s_v)*0.5*dt;
       nwp.d_a = cwp.d_a + (d_jfn(t-dt)+d_jfn(t))*0.5*dt;
       nwp.d_v = cwp.d_v + (cwp.d_a+nwp.d_a)*0.5*dt;
@@ -445,7 +455,7 @@ vector<double> getXY(double s,
   double heading =
       atan2((maps_y[wp2] - maps_y[prev_wp]), (maps_x[wp2] - maps_x[prev_wp]));
   double heading1 =
-    atan2((maps_y[wp3]-maps_y[wp2]),(maps_x[wp3]-mapx_x[wp2]));
+    atan2((maps_y[wp3]-maps_y[wp2]),(maps_x[wp3]-maps_x[wp2]));
   // the x,y,s along the segment
   double seg_s = (s - maps_s[prev_wp]);
   double seg_x = maps_x[prev_wp] + seg_s * cos(heading);
@@ -581,37 +591,53 @@ possibleToChange(int laneId,
    }
    return false;
  }
-
+double change_lane_dt = 0;
  enum DIRECTION { RIGHT,LEFT,SAME,NONE};
 
- std::tuple<std::function<double(double)>,double,double,double,DIRECTION> jerkFuncForSafeFollowingDist(double a0,double v0,double s0,std::vector<std::tuple<double,double,DIRECTION>> carsAheadData) {
+std::tuple<std::function<double(double)>,std::function<double(double)>>
+						    jerkFuncForSafeFollowingDist(std::vector<std::tuple<double,double,DIRECTION>> carsAheadData) {
+   auto cwp=wp.back();
+   
    double tmax = -10;
    // jfn,v1,delta_t,delta_d,Direction,
-   std::vector<std::tuple<std::function<double(double)>,double,double,double,DIRECTION>> carsAheadDataNew;
+   std::vector<std::tuple<std::function<double(double)>,std::function<double(double)>> carsAheadDataNew;
    for(auto carAheadData : carsAheadData) {
      double v1,s1;
      DIRECTION dir;
      std::tie(v1,s1,dir) = carAheadData;
      double const safeTime = 1; //seconds
      double const minDist = lane_width; //meters
-     double delta_d = s1-s0-minDist-v1*safeTime;
-     std::function<double(double)> jfn;
+     double delta_d = s1-cwp.s-minDist-v1*safeTime;
+     std::function<double(double)> jfn_s1,jfn_d;
      double delta_t;
-     std::tie(jfn,delta_t) = achieveZeroAcelAndVel(a0,v0-v1,-v1,max_vel-v1,delta_d);
-     carsAheadDataNew.push_back(std::make_tuple(jfn,v1,delta_t,delta_d,dir));
+     double cjmax,camax,cvmax;
+     if(change_lane_dt<wp.size()*dt && dir==SAME) {
+       cjmax = sqrt(max_jerk*max_jerk-d_jmax*d_jmax);
+       camax = sqrt(max_acc*max_acc-d_amax*d_amax);
+       cvmax = sqrt(max_vel*max_vel-d_vmax*d_vmax);
+     } else {
+       cjmax = sqrt(max_jerk*max_jerk-lcd_jmax*lcd_jmax);
+       camax = sqrt(max_acc*max_acc-lcd_amax*lcd_amax);
+       cvmax = sqrt(max_vel*max_vel-lcd_vmax*lcd_vmax);
+     }
+     
+     std::tie(jfn,delta_t) = achieveZeroAcelAndVel(cwp.s_a,cwp.s_v-v1,-v1,cvmax-v1,delta_d,camax,cjmax);
+     carsAheadDataNew.push_back(std::make_tuple(jfn,v1,delta_t,delta_d));
      if(tmax<delta_t) {
        tmax = delta_t;
      }
    }
-   auto h = [tmax](const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& x) {
+   auto h = [tmax](const std::tuple<std::function<double(double)>,double,double,double>& x) {
               double v1=std::get<1>(x);
               double delta_d = std::get<3>(x);
               return delta_d+v1*tmax;
             };
-   auto cmp = [h,tmax](const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& a,const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& b) {
+   auto cmp = [h,tmax](const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& a,
+		       const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& b) {
                   return h(a)<h(b);
                 };
-   return *std::max_element(carsAheadDataNew.begin(),carsAheadDataNew.end(),cmp);
+   std::function<double(double)> jfn_s1,jfn_d;
+   std::tie(jfn_s1,std::ignore,std::ignore,std::ignore,std::ignore) = *std::max_element(carsAheadDataNew.begin(),carsAheadDataNew.end(),cmp);
  }
 
 
@@ -639,9 +665,13 @@ void read_map() {
  // stored in forward time
 
 
+
 void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car_s,double car_d,double car_yaw,double car_speed) {
   auto sent_size = wp.size();
   auto consumed = sent_size-new_prev_size;
+  change_lane_dt -= consumed*dt;
+  if(change_lane_dt<0)
+    change_lane_dt = 0;
   int cid = consumed-1;
   auto cwp = wp[cid];
   double est_yaw = 0.0;
@@ -669,7 +699,6 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
 
  int main() {
    read_map();
-   checkGetXY();
    uWS::Hub h;
    h.onMessage([](
        uWS::WebSocket<uWS::SERVER> ws,
@@ -683,7 +712,8 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
          string event = j[0].get<string>();
          if (event == "telemetry") {
            double car_x(j[1]["x"]), car_y(j[1]["y"]), car_s(j[1]["s"]), car_d(j[1]["d"]), car_yaw(j[1]["yaw"]),
-	     car_speed(j[1]["speed"]);
+	     car_speed(j[1]["speed"]),end_path_s(j[1]["end_path_s"]);
+	    
            car_yaw *= 0.03490658503;
 	   auto previous_path_x(j[1]["previous_path_x"]);
            auto prev_size = previous_path_x.size();
@@ -711,63 +741,53 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
             double left_s, right_s, same_s;
             double left_v, right_v, same_v;
             std::vector<std::tuple<double,double,DIRECTION>> carsAheadData;
-            if (left_lane_id > -1) {
-              left_lane_change_possible = possibleToChange(left_lane_id,
-                                                           sensor_fusion,
-                                                           car_s,
-                                                           car_speed,
-                                                           prev_size * dt,
-                                                           left_s,
-                                                           left_v);
-              if(left_lane_change_possible) {
-                carsAheadData.push_back(std::make_tuple(left_v,left_s,LEFT));
-              }
-            }
-            if (right_lane_id < 3) {
-              right_lane_change_possible = possibleToChange(right_lane_id,
-                                                            sensor_fusion,
-                                                            car_s,
-                                                            car_speed,
-                                                            prev_size * dt,
-                                                            right_s,
-                                                            right_v);
-              if(right_lane_change_possible) {
-                carsAheadData.push_back(std::make_tuple(right_v,right_s,RIGHT));
-              }
-            }
+	    double prev_dt = prev_size*dt;
+	    if(change_lane_dt<0.1) {
+	      if (left_lane_id > -1) {
+		left_lane_change_possible = possibleToChange(left_lane_id,
+							     sensor_fusion,
+							     end_path_s,
+							     wp.back().s_v,
+							     prev_dt,
+							     left_s,
+							     left_v);
+		if(left_lane_change_possible) {
+		  carsAheadData.push_back(std::make_tuple(left_v,left_s,LEFT));
+		}
+	      }
+	      if (right_lane_id < 3) {
+		right_lane_change_possible = possibleToChange(right_lane_id,
+							      sensor_fusion,
+							      end_path_s,
+							      wp.back().s_v,
+							      prev_dt,
+							      right_s,
+							      right_v);
+		if(right_lane_change_possible) {
+		  carsAheadData.push_back(std::make_tuple(right_v,right_s,RIGHT));
+		}
+	      }
+	    }
             current_lane_possible = possibleToChange(end_path_lane,
                                                      sensor_fusion,
-                                                     car_s,
-                                                     car_speed,
-                                                     prev_size * dt,
+                                                     end_path_s,
+                                                     wp.back().s_v,
+                                                     prev_dt,
                                                      same_s,
                                                      same_v);
             carsAheadData.push_back(std::make_tuple(same_v,same_s,SAME));
-            std::function<double(double)> jfn;
-
-            double delta_t;
-            double delta_d;
-            DIRECTION dir;
-            std::tie(jfn,target_vel,delta_t,delta_d,dir) = jerkFuncForSafeFollowingDist(0.0,car_speed,car_s,carsAheadData);
-
-            int best_lane_id;
-            switch(dir) {
-            case LEFT : if(!left_lane_change_possible) throw("left_lane_change_not possible");
-              best_lane_id = left_lane_id; break;
-            case RIGHT : if(!right_lane_change_possible) throw("right_lane_change_not possible");
-              best_lane_id = right_lane_id; break;
-            case SAME: best_lane_id = end_path_lane; break;
-            default : throw("error");
-            }
-
-            {
-              for(int i=prev_size;i<num_waypoints;i++) {
-              auto nxt_pt = getXY(0,0,map_waypoints_s, map_waypoints_x, map_waypoints_y);
-              }
-            }
+            std::function<double(double)> jfn_s1,jfn_d;
+            std::tie(jfn_s1,jfn_d) = jerkFuncForSafeFollowingDist(carsAheadData);
+	    
           }
 	   std::vector<double> next_x_vals,next_y_vals;
-          msgJson["next_x"] = next_x_vals;
+	   {
+	     for(auto p : wp){
+	       next_x_vals.push_back(p.x);
+	       next_y_vals.push_back(p.y);
+	     }
+	   }
+	   msgJson["next_x"] = next_x_vals;
           msgJson["next_y"] = next_y_vals;
 	  auto msg = "42[\"control\"," + msgJson.dump() + "]";
           //this_thread::sleep_for(chrono::milliseconds(1000));
