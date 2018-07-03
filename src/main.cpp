@@ -194,7 +194,9 @@ std::tuple<std::function<double(double)>,double> achieveZeroAcelAndVel(double a0
   double directDist = std::get<0>(direct);
   double vminDist = std::get<0>(toVmin)+std::get<0>(fromVmin);
   double vmaxDist = std::get<0>(toVmax)+std::get<0>(fromVmax);
-  auto h = [delta_d](std::tuple<double,std::function<double(double)>,double> to,std::tuple<double,std::function<double(double)>,double> from,double vpeak) {
+  auto h = [delta_d](std::tuple<double,std::function<double(double)>,double> to,
+		     std::tuple<double,std::function<double(double)>,double> from,
+		     double vpeak) {
     double t3 = std::get<2>(from);
     double d3 = std::get<0>(from);
     double t1 = std::get<2>(to);
@@ -592,52 +594,74 @@ possibleToChange(int laneId,
    return false;
  }
 double change_lane_dt = 0;
+int target_lane;
  enum DIRECTION { RIGHT,LEFT,SAME,NONE};
+
+double target_d(double cur_d,DIRECTION dir) {
+  if(cur_d<0 || cur_d>12) {
+    throw "error";
+  }
+  double laneid;
+  modf(cur_d/lane_width,&laneid);
+  switch(dir) {
+  case SAME: return laneid*lane_width+2.0;
+  case LEFT: if(laneid>0.999999) return (laneid-1)*lane_width+2.0;
+  case RIGHT: if(laneid<1.99999) return (laneid+1)*lane_width+2.0;
+  }
+}
 
 std::tuple<std::function<double(double)>,std::function<double(double)>>
 						    jerkFuncForSafeFollowingDist(std::vector<std::tuple<double,double,DIRECTION>> carsAheadData) {
-   auto cwp=wp.back();
-   
+
+  auto cwp=wp.back();
+  double cur_lane;
+  modf(cwp.d/lane_width,&cur_lane);
    double tmax = -10;
    // jfn,v1,delta_t,delta_d,Direction,
-   std::vector<std::tuple<std::function<double(double)>,std::function<double(double)>> carsAheadDataNew;
+   std::vector<std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double>> carsAheadDataNew;
    for(auto carAheadData : carsAheadData) {
      double v1,s1;
      DIRECTION dir;
      std::tie(v1,s1,dir) = carAheadData;
      double const safeTime = 1; //seconds
      double const minDist = lane_width; //meters
-     double delta_d = s1-cwp.s-minDist-v1*safeTime;
+     double delta_d_s = s1-cwp.s-minDist-v1*safeTime;
      std::function<double(double)> jfn_s1,jfn_d;
-     double delta_t;
-     double cjmax,camax,cvmax;
+     double delta_t_s;
+     double delta_t_d;
+     double cjmax,camax,cvmax,cur_change_lane_dt;
      if(change_lane_dt<wp.size()*dt && dir==SAME) {
        cjmax = sqrt(max_jerk*max_jerk-d_jmax*d_jmax);
        camax = sqrt(max_acc*max_acc-d_amax*d_amax);
        cvmax = sqrt(max_vel*max_vel-d_vmax*d_vmax);
+       std::tie(jfn_d,delta_t_d) = achieveZeroAcelAndVel(cwp.d_a,cwp.d_v,-d_vmax,d_vmax,target_d(cwp.d,SAME)-cwp.d,d_amax,d_jmax);
+       cur_change_lane_dt = 0.0;
      } else {
        cjmax = sqrt(max_jerk*max_jerk-lcd_jmax*lcd_jmax);
        camax = sqrt(max_acc*max_acc-lcd_amax*lcd_amax);
        cvmax = sqrt(max_vel*max_vel-lcd_vmax*lcd_vmax);
+       std::tie(jfn_d,delta_t_d) = achieveZeroAcelAndVel(cwp.d_a,cwp.d_v,-d_vmax,d_vmax,target_lane*lane_width+2.0-cwp.d,d_amax,d_jmax);
+       cur_change_lane_dt = delta_t_d;
      }
      
-     std::tie(jfn,delta_t) = achieveZeroAcelAndVel(cwp.s_a,cwp.s_v-v1,-v1,cvmax-v1,delta_d,camax,cjmax);
-     carsAheadDataNew.push_back(std::make_tuple(jfn,v1,delta_t,delta_d));
-     if(tmax<delta_t) {
-       tmax = delta_t;
+     std::tie(jfn_s1,delta_t_s) = achieveZeroAcelAndVel(cwp.s_a,cwp.s_v-v1,-v1,cvmax-v1,delta_d_s,camax,cjmax);
+     carsAheadDataNew.push_back(std::make_tuple(jfn_s1,v1,delta_d_s,jfn_d,cur_change_lane_dt));
+     if(tmax<delta_t_s) {
+       tmax = delta_t_s;
      }
    }
-   auto h = [tmax](const std::tuple<std::function<double(double)>,double,double,double>& x) {
+   auto h = [tmax](const std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double>& x) {
               double v1=std::get<1>(x);
-              double delta_d = std::get<3>(x);
+              double delta_d = std::get<2>(x);
               return delta_d+v1*tmax;
             };
-   auto cmp = [h,tmax](const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& a,
-		       const std::tuple<std::function<double(double)>,double,double,double,DIRECTION>& b) {
+   auto cmp = [h](const std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double>& a,
+		  const std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double>& b) {
                   return h(a)<h(b);
                 };
    std::function<double(double)> jfn_s1,jfn_d;
-   std::tie(jfn_s1,std::ignore,std::ignore,std::ignore,std::ignore) = *std::max_element(carsAheadDataNew.begin(),carsAheadDataNew.end(),cmp);
+   std::tie(jfn_s1,std::ignore,std::ignore,jfn_d,change_lane_dt) = *std::max_element(carsAheadDataNew.begin(),carsAheadDataNew.end(),cmp);
+   return std::make_tuple(jfn_s1,jfn_d);
  }
 
 
@@ -778,7 +802,7 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
             carsAheadData.push_back(std::make_tuple(same_v,same_s,SAME));
             std::function<double(double)> jfn_s1,jfn_d;
             std::tie(jfn_s1,jfn_d) = jerkFuncForSafeFollowingDist(carsAheadData);
-	    
+	    createWayPoints(jfn_s1,jfn_d,wp,map_waypoints_s,map_waypoints_x,map_waypoints_y);
           }
 	   std::vector<double> next_x_vals,next_y_vals;
 	   {
