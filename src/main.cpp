@@ -15,6 +15,7 @@ using namespace std;
 #include "Eigen-3.3/Eigen/Dense"
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
+
 vector<double> JMT(vector<double> start, vector<double> end, double T) {
   MatrixXd A = MatrixXd(3, 3);
   A << T * T * T, T * T * T * T, T * T * T * T * T,
@@ -36,19 +37,14 @@ vector<double> JMT(vector<double> start, vector<double> end, double T) {
 #include <functional>
 #include <cmath>
 #include <fstream>
-struct WP {
-  double x,v,a;
-};
-
-
 const double max_s = 6945.554;
 const double mps2mph = 2.23694;
 const double dt = 0.02; // time between waypoints
 const double time_horizon = 3.0; // time horizon in seconds
 const int num_waypoints = time_horizon / dt;
 const double lane_width = 4.0;
-const double max_jerk = 5; // meters per sec^3
-const double max_acc = 5; // meters per sec^2
+const double max_jerk = 10; // meters per sec^3
+const double max_acc = 10; // meters per sec^2
 const double max_vel_mph = 45;
 
 const double max_acc_change_per_frame = max_jerk * dt;
@@ -139,6 +135,14 @@ std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange
     double t1(std::get<3>(to)),t3(std::get<3>(from)),d1(std::get<0>(to)),d3(std::get<0>(from));
     double u1(v0+std::get<1>(to)),u3(v1-std::get<1>(from));
     double t2 = (u3-u1)/apeak;
+    if(t2<-1e-7) {
+      throw("error");
+    }
+
+    if(fabs(t2)<1e-8) {
+      t2 = 0;
+    }
+
     double d2 = (u1+u3)*0.5*t2;
     auto jfn1 = std::get<2>(to);
     auto jfn3 = std::get<2>(from);
@@ -380,48 +384,60 @@ vector<double> getXYOld(double s,
 struct WayPoint {
   double s,d,x,y,s_v,s_a,d_v,d_a,ds1ds;
 };
+WayPoint carStateAtBeginningOfNewPoints,currentCarState;
+vector<double> map_waypoints_x, map_waypoints_y, map_waypoints_s,map_waypoints_dx, map_waypoints_dy;
 std::deque<WayPoint> wp;
+typedef std::function<std::tuple<double,double>(double)> T;
+auto pd = [](int i1,int i2) {
+            double x1(map_waypoints_x[i1]),y1(map_waypoints_y[i1]),x2(map_waypoints_x[i2]),y2(map_waypoints_y[i2]);
+            double h = atan2(y2-y1,x2-x1);
+            double ph = h - pi()/2;
+            double cos_ph = cos(ph);
+            double sin_ph = sin(ph);
+            return [cos_ph,sin_ph,x1,y1](double d) { return std::make_tuple(x1+d*cos_ph,y1+d*sin_ph); };
+          };
+auto XY = [](const T& pd1,const T& pd2,double s1,double s2) {
+            auto f = [s1,s2](double v1,double v2) {
+                       return [s1,s2,v1,v2](double s){ return (v1*(s2-s)+v2*(s-s1))/(s2-s1); };
+                     };
+            return [&f,&pd1,&pd2,&s1,&s2](double s,double d) {
+                     double px1,py1,px2,py2;
+                     std::tie(px1,py1) = pd1(d);
+                     std::tie(px2,py2) = pd2(d);
+                     double dpx(px2-px1),dpy(py2-py1);
+                     double ds1ds = sqrt(dpx*dpx+dpy*dpy)/(s2-s1);
+                     return std::make_tuple(f(px1,px2)(s),f(py1,py2)(s),ds1ds);
+                   };
+          };
+
+std::tuple<double,double> getMySD(double x,double y,double s,double d) {
+  int i2 = std::lower_bound(map_waypoints_s.begin(),map_waypoints_s.end(),s)-map_waypoints_s.begin();
+  int i1 = i2>0?i2-1:map_waypoints_s.size()-1;
+  int i3 = (i2+1)%map_waypoints_s.size();
+  auto pd1 = pd(i1,i2);
+  auto pd2 = pd(i2,i3);
+
+
+}
 
 void createWayPoints(std::function<double(double)> s1_jfn,std::function<double(double)> d_jfn,std::deque<WayPoint>& wp,
 		     const vector<double>& maps_s,const vector<double>& maps_x,const vector<double>& maps_y,int num_waypoints=50) {
 
-  typedef std::function<std::tuple<double,double>(double)> T;
-  auto pd = [&maps_x,&maps_y](int i1,int i2) {
-    double x1(maps_x[i1]),y1(maps_y[i1]),x2(maps_x[i2]),y2(maps_y[i2]);
-    double h = atan2(y2-y1,x2-x1);
-    double ph = h - pi()/2;
-    double cos_ph = cos(ph);
-    double sin_ph = sin(ph);
-    return [cos_ph,sin_ph,x1,y1](double d) { return std::make_tuple(x1+d*cos_ph,y1+d*sin_ph); };
-  };
-  auto XY = [](const T& pd1,const T& pd2,double s1,double s2) {
-    auto f = [s1,s2](double v1,double v2) {
-      return [s1,s2,v1,v2](double s){ return (v1*(s2-s)+v2*(s-s1))/(s2-s1); };
-    };
-    return [&f,&pd1,&pd2,&s1,&s2](double s,double d) {
-      double px1,py1,px2,py2;
-      std::tie(px1,py1) = pd1(d);
-      std::tie(px2,py2) = pd2(d);
-      double dpx(px2-px1),dpy(py2-py1);
-      double ds1ds = sqrt(dpx*dpx+dpy*dpy)/(s2-s1);
-      return std::make_tuple(f(px1,px2)(s),f(py1,py2)(s),ds1ds);
-    };
-  };
 
-  
+
   T pd1,pd2;
   int wp1,wp2,wp3;
   double t(0.02);
-  wp2 = std::lower_bound(maps_s.begin(),maps_s.end(),wp.back().s)-maps_s.begin();
+  wp2 = std::lower_bound(maps_s.begin(),maps_s.end(),carStateAtBeginningOfNewPoints.s)-maps_s.begin();
   wp1 = wp2>0?wp2-1:maps_s.size()-1;
   wp3 = (wp2+1)%maps_s.size();
   pd1 = pd(wp1,wp2);
   pd2 = pd(wp2,wp3);
+  WayPoint cwp = carStateAtBeginningOfNewPoints;
   while(wp.size()<num_waypoints) {
     double s1(maps_s[wp1]),s2(maps_s[wp2]);
     auto xy = XY(pd1,pd2,s1,s2);
-    while(s2>wp.back().s && wp.size()<num_waypoints) {
-      auto cwp = wp.back();
+    while(s2>carStateAtBeginningOfNewPoints.s && wp.size()<num_waypoints) {
       WayPoint nwp;
       nwp.s_a = cwp.s_a + (s1_jfn(t-dt)+s1_jfn(t))*0.5*dt/cwp.ds1ds;
       nwp.s_v = cwp.s_v + (cwp.s_a+nwp.s_a)*0.5*dt;
@@ -431,6 +447,7 @@ void createWayPoints(std::function<double(double)> s1_jfn,std::function<double(d
       nwp.d = cwp.d + (cwp.d_v+nwp.d_v)*0.5*dt;
       std::tie(nwp.x,nwp.y,nwp.ds1ds) = xy(nwp.s,nwp.d);
       t+=dt;
+      cwp = nwp;
       wp.push_back(nwp);
     }
     wp1 = wp2;
@@ -451,7 +468,7 @@ vector<double> getXY(double s,
     prev_wp++;
   }
 
-  
+
   int wp2 = (prev_wp + 1) % maps_x.size();
   int wp3 = (wp2+1) %maps_x.size();
   double heading =
@@ -613,7 +630,7 @@ double target_d(double cur_d,DIRECTION dir) {
 std::tuple<std::function<double(double)>,std::function<double(double)>>
 						    jerkFuncForSafeFollowingDist(std::vector<std::tuple<double,double,DIRECTION>> carsAheadData) {
 
-  auto cwp=wp.back();
+  auto cwp=carStateAtBeginningOfNewPoints;
   double cur_lane;
   modf(cwp.d/lane_width,&cur_lane);
    double tmax = -10;
@@ -643,7 +660,7 @@ std::tuple<std::function<double(double)>,std::function<double(double)>>
        std::tie(jfn_d,delta_t_d) = achieveZeroAcelAndVel(cwp.d_a,cwp.d_v,-d_vmax,d_vmax,target_lane*lane_width+2.0-cwp.d,d_amax,d_jmax);
        cur_change_lane_dt = delta_t_d;
      }
-     
+
      std::tie(jfn_s1,delta_t_s) = achieveZeroAcelAndVel(cwp.s_a,cwp.s_v-v1,-v1,cvmax-v1,delta_d_s,camax,cjmax);
      carsAheadDataNew.push_back(std::make_tuple(jfn_s1,v1,delta_d_s,jfn_d,cur_change_lane_dt));
      if(tmax<delta_t_s) {
@@ -666,7 +683,7 @@ std::tuple<std::function<double(double)>,std::function<double(double)>>
 
 
 
-vector<double> map_waypoints_x, map_waypoints_y, map_waypoints_s,map_waypoints_dx, map_waypoints_dy;
+
 
 void read_map() {
    string map_file_ = "../data/highway_map.csv";
@@ -688,35 +705,58 @@ void read_map() {
 
  // stored in forward time
 
+auto chk = [](double est,double act,const char* name) {
+                 std::cout<<name<<" estimate : "<<est<<" actual : "<<act<<" error : "<<fabs(est-act)<<std::endl;
+               };
 
 
 void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car_s,double car_d,double car_yaw,double car_speed) {
-  auto sent_size = wp.size();
-  auto consumed = sent_size-new_prev_size;
-  change_lane_dt -= consumed*dt;
-  if(change_lane_dt<0)
-    change_lane_dt = 0;
-  int cid = consumed-1;
-  auto cwp = wp[cid];
-  double est_yaw = 0.0;
-  if(cid>0) {
-    auto pwp = wp[cid-1];
-    est_yaw = atan2(cwp.y-pwp.y,cwp.x-pwp.x);
-  }
-  double est_speed = sqrt(cwp.s_v*cwp.ds1ds*cwp.s_v*cwp.ds1ds+cwp.d_v*cwp.d_v);
-  auto chk = [](double est,double act,const char* name) {
-    std::cout<<name<<" estimate : "<<est<<" actual : "<<act<<" error : "<<fabs(est-act);
-  };
-  std::ofstream fout("rundata.csv");
-  
-  chk(cwp.s,car_s,"car_s");
-  chk(cwp.d,car_d,"car_d");
-  chk(cwp.x,car_x,"car_x");
-  chk(cwp.y,car_y,"car_y");
-  chk(est_yaw,car_yaw,"car_yaw");
-  chk(est_speed,car_speed,"car_speed");
-  for(int i=sent_size;i>new_prev_size;i--) {
-    wp.pop_front();
+  if(wp.size()==0) {
+    WayPoint p;
+    p.s = car_s;
+    p.x = car_x;
+    p.y = car_y;
+    p.d = car_d;
+    p.s_v = car_speed;
+    p.d_v = 0;
+    p.d_a = 0;
+    p.s_a = 0;
+    int wp2 = std::lower_bound(map_waypoints_s.begin(),map_waypoints_s.end(),car_s)-map_waypoints_s.begin();
+    int wp1 = wp2>0?wp2-1:map_waypoints_s.size()-1;
+    int wp3 = (wp2+1)%map_waypoints_s.size();
+    auto pd1 = pd(wp1,wp2);
+    auto pd2 = pd(wp2,wp3);
+    double x, y;
+    std::tie(x,y,p.ds1ds) = XY(pd1,pd2,map_waypoints_s[wp1],map_waypoints_s[wp2])(p.s,p.d);
+    chk(x,p.x,"car_x");
+    chk(y,p.y,"car_y");
+    carStateAtBeginningOfNewPoints = p;
+    currentCarState = p;
+  } else {
+    auto sent_size = wp.size();
+    auto consumed = sent_size-new_prev_size;
+    change_lane_dt -= consumed*dt;
+    if(change_lane_dt<0)
+      change_lane_dt = 0;
+    int cid = consumed-1;
+    auto cwp = wp[cid];
+    currentCarState = cwp;
+    carStateAtBeginningOfNewPoints = wp.back();
+    double est_yaw = 0.0;
+    if(cid>0) {
+      auto pwp = wp[cid-1];
+      est_yaw = atan2(cwp.y-pwp.y,cwp.x-pwp.x);
+    }
+    double est_speed = sqrt(cwp.s_v*cwp.ds1ds*cwp.s_v*cwp.ds1ds+cwp.d_v*cwp.d_v);
+       chk(cwp.s,car_s,"car_s");
+    chk(cwp.d,car_d,"car_d");
+    chk(cwp.x,car_x,"car_x");
+    chk(cwp.y,car_y,"car_y");
+    chk(est_yaw,car_yaw,"car_yaw");
+    chk(est_speed,car_speed,"car_speed");
+    for(int i=sent_size;i>new_prev_size;i--) {
+      wp.pop_front();
+    }
   }
 }
 
@@ -737,7 +777,7 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
          if (event == "telemetry") {
            double car_x(j[1]["x"]), car_y(j[1]["y"]), car_s(j[1]["s"]), car_d(j[1]["d"]), car_yaw(j[1]["yaw"]),
 	     car_speed(j[1]["speed"]),end_path_s(j[1]["end_path_s"]);
-	    
+
            car_yaw *= 0.03490658503;
 	   auto previous_path_x(j[1]["previous_path_x"]);
            auto prev_size = previous_path_x.size();
@@ -745,7 +785,7 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
            auto sensor_fusion = j[1]["sensor_fusion"];
            double car_lane;
            modf(car_d / lane_width, &car_lane);
-           
+
 
 
           double end_path_lane;
@@ -770,8 +810,8 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
 	      if (left_lane_id > -1) {
 		left_lane_change_possible = possibleToChange(left_lane_id,
 							     sensor_fusion,
-							     end_path_s,
-							     wp.back().s_v,
+							     carStateAtBeginningOfNewPoints.s,
+							     carStateAtBeginningOfNewPoints.s_v,
 							     prev_dt,
 							     left_s,
 							     left_v);
@@ -782,8 +822,8 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
 	      if (right_lane_id < 3) {
 		right_lane_change_possible = possibleToChange(right_lane_id,
 							      sensor_fusion,
-							      end_path_s,
-							      wp.back().s_v,
+							      carStateAtBeginningOfNewPoints.s,
+							      carStateAtBeginningOfNewPoints.s_v,
 							      prev_dt,
 							      right_s,
 							      right_v);
@@ -794,8 +834,8 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
 	    }
             current_lane_possible = possibleToChange(end_path_lane,
                                                      sensor_fusion,
-                                                     end_path_s,
-                                                     wp.back().s_v,
+                                                     carStateAtBeginningOfNewPoints.s,
+                                                     carStateAtBeginningOfNewPoints.s_v,
                                                      prev_dt,
                                                      same_s,
                                                      same_v);
