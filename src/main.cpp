@@ -808,7 +808,7 @@ int main() {
               double final_s =
                   car_s + (ref_vel_mps + best_speed) * 0.5 * (time_horizon-dt*prev_size);
 
-              for (double alpha:{0.9, 1.0}) {
+              for (double alpha:{0.4,0.7, 1.0}) {
                 auto nxt_pt = getXY(car_s * (1 - alpha) + final_s * alpha,
                                     car_d * (1 - alpha) + final_d * alpha,
                                     map_waypoints_s,
@@ -835,14 +835,15 @@ int main() {
               for (int i = 1; i <= num_waypoints - previous_path_x.size();
                    i++) {
                 double desired_acc = (target_vel - ref_vel_mps) / time_left;
-                if (desired_acc > ref_acc_mps2 + max_acc_change_per_frame)
-                  desired_acc = ref_acc_mps2 + max_acc_change_per_frame;
-                else if (desired_acc < ref_acc_mps2 - max_acc_change_per_frame)
-                  desired_acc = ref_acc_mps2 - max_acc_change_per_frame;
                 if (desired_acc > max_acc)
                   desired_acc = max_acc;
                 else if (desired_acc < -max_acc)
                   desired_acc = -max_acc;
+
+                if (desired_acc > ref_acc_mps2 + max_acc_change_per_frame)
+                  desired_acc = ref_acc_mps2 + max_acc_change_per_frame;
+                else if (desired_acc < ref_acc_mps2 - max_acc_change_per_frame)
+                  desired_acc = ref_acc_mps2 - max_acc_change_per_frame;
                 ref_acc_mps2 = desired_acc;
                 ref_vel_mps += ref_acc_mps2 * dt;
                 time_left -= dt;
