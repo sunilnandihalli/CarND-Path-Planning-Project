@@ -15,7 +15,7 @@ using namespace std;
 #include "Eigen-3.3/Eigen/Dense"
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
-
+#define mythrow(m) {std::cout<<" line : "<<__LINE__<< " : "<<m<<std::endl<<std::flush;throw(m);}
 vector<double> JMT(vector<double> start, vector<double> end, double T) {
   MatrixXd A = MatrixXd(3, 3);
   A << T * T * T, T * T * T * T, T * T * T * T * T,
@@ -40,8 +40,9 @@ vector<double> JMT(vector<double> start, vector<double> end, double T) {
 const double max_s = 6945.554;
 const double mps2mph = 2.23694;
 const double dt = 0.02; // time between waypoints
-const double time_horizon = 3.0; // time horizon in seconds
-const int num_waypoints = time_horizon / dt;
+//const double time_horizon = 3.0; // time horizon in seconds
+//const int num_waypoints = time_horizon / dt;
+const int num_waypoints = 40;
 const double lane_width = 4.0;
 const double max_jerk = 10; // meters per sec^3
 const double max_acc = 10; // meters per sec^2
@@ -58,6 +59,28 @@ const double lcd_vmax = 3.0;
 const double d_jmax = 1.0;
 const double d_amax = 1.0;
 const double d_vmax = 1.0;
+int target_lane = 1;
+int call_id(0);
+double change_lane_dt = 0;
+// for convenience
+using json = nlohmann::json;
+
+
+typedef std::vector<std::vector<double> > sfdtype;
+sfdtype extractSensorFusionData(json& sensor_fusion) {
+  sfdtype ret;
+  for(auto sf:sensor_fusion) {
+    std::vector<double> nsf;
+    for(int i=0;i<7;i++) {
+      double d = double(sf[i]);
+      nsf.push_back(d);
+    }
+    if(nsf[6]<0)
+      break;
+    ret.push_back(nsf);
+  }
+  return ret;
+}
 
 double secant(const std::function<double(double)>& f,double min,double max,double tol,const char* call_name) {
   double x0(min),x1(max);
@@ -136,7 +159,7 @@ std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange
     double u1(v0+std::get<1>(to)),u3(v1-std::get<1>(from));
     double t2 = (u3-u1)/apeak;
     if(t2<-1e-7) {
-      throw("error");
+      mythrow("error");
     }
 
     if(fabs(t2)<1e-8) {
@@ -160,7 +183,7 @@ std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange
     if(t2>=0) {
       return std::make_tuple(d1+d2+d3,jfn,t1+t2+t3);
     } else {
-      throw("error");
+      mythrow("error");
     }
   };
   if(fabs(dv-std::get<1>(direct))<1e-6) {
@@ -184,11 +207,11 @@ std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange
 // dist,jfn,totaltime
 std::tuple<double,std::function<double(double)>,double> distDuringVelocityChange(double a0,double v0,double v1,double jmax,double amax) {
   auto x = distDuringVelocityChangeH(a0,v0,v1,jmax,amax);
-      static char buffer[1000];
-      sprintf(buffer,"distDuringVelocityChange : a0 %f v0 %f v1 %f returns dist %f totaltime %f",a0,v0,v1,std::get<0>(x),std::get<2>(x));
-      //std::cout<<buffer<<std::endl;
-      return x;
-    }
+  static char buffer[1000];
+  sprintf(buffer,"distDuringVelocityChange : a0 %f v0 %f v1 %f returns dist %f totaltime %f",a0,v0,v1,std::get<0>(x),std::get<2>(x));
+  //std::cout<<buffer<<std::endl;
+  return x;
+}
 std::tuple<std::function<double(double)>,double> achieveZeroAcelAndVel(double a0,double v0,double vmin,double vmax,double delta_d,double amax,double jmax) {
   auto direct = distDuringVelocityChange(a0,v0,0,jmax,amax);
   auto toVmin = distDuringVelocityChange(a0,v0,vmin,jmax,amax);
@@ -228,13 +251,13 @@ std::tuple<std::function<double(double)>,double> achieveZeroAcelAndVel(double a0
     if(vmin<0) {
       return h(toVmin,fromVmin,vmin);
     } else {
-      throw("should not come here");
+      mythrow("should not come here");
     }
   } else if(delta_d > vmaxDist) {
     if(vmax>0) {
       return h(toVmax,fromVmax,vmax);
     } else {
-      throw("should not come here");
+      mythrow("should not come here");
     }
   } else {
     auto f = [a0,v0,delta_d,jmax,amax](double vpeak) {
@@ -251,8 +274,6 @@ std::tuple<std::function<double(double)>,double> achieveZeroAcelAndVel(double a0
 
 
 
-// for convenience
-using json = nlohmann::json;
 
 // For converting back and forth between radians and degrees.
 constexpr double pi() {
@@ -383,107 +404,90 @@ vector<double> getXYOld(double s,
 }
 struct WayPoint {
   double s,d,x,y,s_v,s_a,d_v,d_a,ds1ds;
+  int wp1,wp2,wp3;
 };
 WayPoint carStateAtBeginningOfNewPoints,currentCarState;
 vector<double> map_waypoints_x, map_waypoints_y, map_waypoints_s,map_waypoints_dx, map_waypoints_dy;
 std::deque<WayPoint> wp;
 typedef std::function<std::tuple<double,double>(double)> T;
-auto pd = [](int i1,int i2) {
-            double x1(map_waypoints_x[i1]),y1(map_waypoints_y[i1]),x2(map_waypoints_x[i2]),y2(map_waypoints_y[i2]);
-            double h = atan2(y2-y1,x2-x1);
-            double ph = h - pi()/2;
-            double cos_ph = cos(ph);
-            double sin_ph = sin(ph);
-            return [cos_ph,sin_ph,x1,y1](double d) { return std::make_tuple(x1+d*cos_ph,y1+d*sin_ph); };
-          };
-auto XY = [](const T& pd1,const T& pd2,double s1,double s2) {
-            auto f = [s1,s2](double v1,double v2) {
-                       return [s1,s2,v1,v2](double s){ return (v1*(s2-s)+v2*(s-s1))/(s2-s1); };
-                     };
-            return [&f,&pd1,&pd2,&s1,&s2](double s,double d) {
-                     double px1,py1,px2,py2;
-                     std::tie(px1,py1) = pd1(d);
-                     std::tie(px2,py2) = pd2(d);
-                     double dpx(px2-px1),dpy(py2-py1);
-                     double ds1ds = sqrt(dpx*dpx+dpy*dpy)/(s2-s1);
-                     return std::make_tuple(f(px1,px2)(s),f(py1,py2)(s),ds1ds);
-                   };
-          };
+std::function<std::tuple<double,double>(double)> pd(int i1,int i2) {
+  double x1(map_waypoints_x[i1]),y1(map_waypoints_y[i1]),x2(map_waypoints_x[i2]),y2(map_waypoints_y[i2]);
+  double h = atan2(y2-y1,x2-x1);
+  double ph = h - pi()/2;
+  double cos_ph = cos(ph);
+  double sin_ph = sin(ph);
+  return [cos_ph,sin_ph,x1,y1](double d) { return std::make_tuple(x1+d*cos_ph,y1+d*sin_ph); };
+};
+std::function<std::tuple<double,double,double>(double,double)> XY(T pd1,T pd2,double s1,double s2) {
+  auto f = [s1,s2](double v1,double v2) {
+             return [s1,s2,v1,v2](double s){ return (v1*(s2-s)+v2*(s-s1))/(s2-s1); };
+           };
+  return [f,pd1,pd2,s1,s2](double s,double d) {
+           double px1,py1,px2,py2;
+           std::tie(px1,py1) = pd1(d);
+           std::tie(px2,py2) = pd2(d);
+           double dpx(px2-px1),dpy(py2-py1);
+           double ds1ds = sqrt(dpx*dpx+dpy*dpy)/(s2-s1);
+           return std::make_tuple(f(px1,px2)(s),f(py1,py2)(s),ds1ds);
+         };
+};
+
+std::function<std::tuple<double,double,double,double>(double,double)> gradient(double x, double y,int i1,double i2,double i3) {
+
+  double x1(map_waypoints_x[i1]),y1(map_waypoints_y[i1]),x2(map_waypoints_x[i2]),y2(map_waypoints_y[i2]),x3(map_waypoints_x[i3]),y3(map_waypoints_y[i3]);
+  double s1(map_waypoints_s[i1]),s2(map_waypoints_s[i2]);
+  double ph1 = atan2(y2-y1,x2-x1)-pi()/2;
+  double cos_ph1 = cos(ph1);
+  double sin_ph1 = sin(ph1);
+  double ph2 = atan2(y3-y2,x3-x2)-pi()/2;
+  double cos_ph2 = cos(ph2);
+  double sin_ph2 = sin(ph2);
+  auto f = [s1,s2](double v1,double v2,double s) {
+             return (v1*(s2-s)+v2*(s-s1))/(s2-s1);
+           };
+
+  return [s1,s2,x1,x2,x3,y1,y2,y3,cos_ph1,cos_ph2,sin_ph1,sin_ph2,f](double s,double d) {
+             double xs,xd,ys,yd;
+             xd = f(cos_ph1,cos_ph2,s);
+             yd = f(sin_ph1,sin_ph2,s);
+             xs = ((x2+d*cos_ph2)-(x1+d*cos_ph1))/(s2-s1);
+             ys = ((y2+d*sin_ph2)-(y1+d*sin_ph1))/(s2-s1);
+             return make_tuple(xs,ys,xd,yd);
+         };
+
+}
 
 std::tuple<double,double> getMySD(double x,double y,double s,double d) {
   int i2 = std::lower_bound(map_waypoints_s.begin(),map_waypoints_s.end(),s)-map_waypoints_s.begin();
   int i1 = i2>0?i2-1:map_waypoints_s.size()-1;
   int i3 = (i2+1)%map_waypoints_s.size();
+  double s1(map_waypoints_s[i1]),s2(map_waypoints_s[i2]);
   auto pd1 = pd(i1,i2);
   auto pd2 = pd(i2,i3);
-
-
-}
-
-void createWayPoints(std::function<double(double)> s1_jfn,std::function<double(double)> d_jfn,std::deque<WayPoint>& wp,
-		     const vector<double>& maps_s,const vector<double>& maps_x,const vector<double>& maps_y,int num_waypoints=50) {
-
-
-
-  T pd1,pd2;
-  int wp1,wp2,wp3;
-  double t(0.02);
-  wp2 = std::lower_bound(maps_s.begin(),maps_s.end(),carStateAtBeginningOfNewPoints.s)-maps_s.begin();
-  wp1 = wp2>0?wp2-1:maps_s.size()-1;
-  wp3 = (wp2+1)%maps_s.size();
-  pd1 = pd(wp1,wp2);
-  pd2 = pd(wp2,wp3);
-  WayPoint cwp = carStateAtBeginningOfNewPoints;
-  while(wp.size()<num_waypoints) {
-    double s1(maps_s[wp1]),s2(maps_s[wp2]);
-    auto xy = XY(pd1,pd2,s1,s2);
-    while(s2>carStateAtBeginningOfNewPoints.s && wp.size()<num_waypoints) {
-      WayPoint nwp;
-      nwp.s_a = cwp.s_a + (s1_jfn(t-dt)+s1_jfn(t))*0.5*dt/cwp.ds1ds;
-      nwp.s_v = cwp.s_v + (cwp.s_a+nwp.s_a)*0.5*dt;
-      nwp.s = cwp.s + (cwp.s_v+nwp.s_v)*0.5*dt;
-      nwp.d_a = cwp.d_a + (d_jfn(t-dt)+d_jfn(t))*0.5*dt;
-      nwp.d_v = cwp.d_v + (cwp.d_a+nwp.d_a)*0.5*dt;
-      nwp.d = cwp.d + (cwp.d_v+nwp.d_v)*0.5*dt;
-      std::tie(nwp.x,nwp.y,nwp.ds1ds) = xy(nwp.s,nwp.d);
-      t+=dt;
-      cwp = nwp;
-      wp.push_back(nwp);
-    }
-    wp1 = wp2;
-    wp2 = wp3;
-    wp3 = (wp3+1)%maps_s.size();
-    pd1 = pd2;
-    pd2 = pd(wp2,wp3);
+  auto xy = XY(pd1,pd2,s1,s2);
+  auto dxdy = [xy,x,y](double s,double d) {
+                double xh,yh;
+                std::tie(xh,yh,std::ignore) = xy(s,d);
+                return std::make_tuple(xh-x,yh-y);
+              };
+  auto grad = gradient(x,y,i1,i2,i3);
+  double dx,dy;
+  while(true) {
+    std::tie(dx,dy) = dxdy(s,d);
+    double err = dx*dx+dy*dy;
+    if(err<1e-4) break;
+    double xs,xd,ys,yd;
+    std::tie(xs,ys,xd,yd) = grad(s,d);
+    double J = xs*yd-ys*xd;
+    double delta_s = (dx*yd-dy*xd)/J;
+    double delta_d = (-dx*ys+dy*xs)/J;
+    s-=delta_s;
+    d-=delta_d;
+    std::cout<<" s : "<<s<<" d : "<<d<<" dx : "<<dx<<" dy : "<<dy<<" error : "<<err<<std::endl;
   }
+  return std::make_tuple(s,d);
 }
 
-vector<double> getXY(double s,
-                     double d,
-                     const vector<double>& maps_s,
-                     const vector<double>& maps_x,
-                     const vector<double>& maps_y) {
-  int prev_wp = -1;
-  while (s > maps_s[prev_wp + 1] && (prev_wp < (int) (maps_s.size() - 1))) {
-    prev_wp++;
-  }
-
-
-  int wp2 = (prev_wp + 1) % maps_x.size();
-  int wp3 = (wp2+1) %maps_x.size();
-  double heading =
-      atan2((maps_y[wp2] - maps_y[prev_wp]), (maps_x[wp2] - maps_x[prev_wp]));
-  double heading1 =
-    atan2((maps_y[wp3]-maps_y[wp2]),(maps_x[wp3]-maps_x[wp2]));
-  // the x,y,s along the segment
-  double seg_s = (s - maps_s[prev_wp]);
-  double seg_x = maps_x[prev_wp] + seg_s * cos(heading);
-  double seg_y = maps_y[prev_wp] + seg_s * sin(heading);
-  double perp_heading = heading - pi() / 2;
-  double x = seg_x + d * cos(perp_heading);
-  double y = seg_y + d * sin(perp_heading);
-  return {x, y};
-}
 
 bool
 double_equals(double d1, double d2, double tol = 1e-9) {
@@ -494,19 +498,15 @@ double_equals(double d1, double d2, double tol = 1e-9) {
 double dist(double s1, double s2) {
   if (double_equals(s1, sentinel) || double_equals(s2, sentinel))
     return sentinel;
-  const double thr = 1000;
-  double ret = s2 - s1;
-  if (ret > thr) {
-    ret -= max_s;
-  } else if (ret < -thr) {
-    ret += max_s;
-  }
-  if (abs(ret) > thr) {
-    std::cout << "s1 : " << s1 << " s2 : " << s2 << " ret : " << ret
-              << " thr : " << thr << std::endl;
-//    assert(abs(ret) < thr);
-  }
-  return ret;
+  if(s2>=s1) {
+    double d1 = s2 - s1;
+    double d2 = max_s-(s2-s1);
+    if(fabs(d1)<fabs(d2))
+      return d1;
+    else
+      return -d2;
+  } else
+    return -dist(s2,s1);
 }
 
 double
@@ -537,9 +537,148 @@ advance_s(double dt, double s, double v, double a = 0.0, double adot = 0.0) {
   return ret;
 }
 
+
+std::vector<std::tuple<double,double,double,double,double,double>> getCarsData(sfdtype& sensor_fusion,double car_s,double car_v,double ref_dt) {
+  std::vector<std::tuple<double,double,double,double,double,double>> ret(3,std::make_tuple(sentinel,sentinel,sentinel,sentinel,sentinel,sentinel));
+  for(auto sf:sensor_fusion) {
+    double d = sf[6];
+    double laneIdReal;
+    modf(d/lane_width,&laneIdReal);
+    int laneId=int(laneIdReal);
+    double back_s,back_v,back_dist,front_s,front_v,front_dist;
+    std::tie(back_s,back_v,back_dist,front_s,front_v,front_dist) = ret[laneId];
+    double vx = sf[3];
+    double vy = sf[4];
+    double v = sqrt(vx * vx + vy * vy);
+    double s = sf[5];
+    s = advance_s(ref_dt,s,v);
+    if(dist(car_s,s)>0) {
+      if(double_equals(front_s,sentinel) || dist(front_s,s)<0) {
+        front_s = s;
+        front_v = v;
+        front_dist = dist(car_s,s);
+      }
+    } else if (dist(car_s, s)<0) {
+      if(double_equals(back_s,sentinel) || dist(back_s,s)>0) {
+        back_s = s;
+        back_v = v;
+        back_dist = dist(car_s,s);
+      }
+    }
+    ret[laneId]=std::make_tuple(back_s,back_v,back_dist,front_s,front_v,front_dist);
+  }
+  return ret;
+}
+
+
+void createWayPoints(std::function<double(double)> s1_jfn,std::function<double(double)> d_jfn,std::deque<WayPoint>& wp,
+		     const vector<double>& maps_s,const vector<double>& maps_x,const vector<double>& maps_y,int num_waypoints,sfdtype& sensor_fusion) {
+
+  static double total_t(0);
+  static int num_points_created(0);
+  static ofstream fout("wp.csv");
+
+  if(num_points_created==0) {
+    fout<<"num_points_created,wp1,wp2,wp3,target_lane,s1,s2,s,s_a,s_v,d,d_a,d_v,ds1ds,s1_jfn,d_jfn,total_t,t,call_id,x,y,change_lane_dt,back_s_0,back_v_0,back_dist_0,back_dv_0,front_s_0,front_v_0,front_dist_0,front_dv_0,back_s_1,back_v_1,back_dist_1,back_dv_1,front_s_1,front_v_1,front_dist_1,front_dv_1,back_s_2,back_v_2,back_dist_2,back_dv_2,front_s_2,front_v_2,front_dist_2,front_dv_2"<<std::endl;
+  }
+
+  T pd1,pd2;
+  int wp1,wp2,wp3;
+  double t(dt);
+  wp2 = std::lower_bound(maps_s.begin(),maps_s.end(),carStateAtBeginningOfNewPoints.s)-maps_s.begin();
+  wp1 = wp2>0?wp2-1:maps_s.size()-1;
+  wp3 = (wp2+1)%maps_s.size();
+  pd1 = pd(wp1,wp2);
+  pd2 = pd(wp2,wp3);
+  WayPoint cwp = carStateAtBeginningOfNewPoints;
+  double s1(maps_s[wp1]),s2(maps_s[wp2]);
+  auto xy = XY(pd1,pd2,s1,s2);
+
+  while(wp.size()<num_waypoints) {
+    WayPoint nwp;
+    double cwp_s1jfn(s1_jfn(t-dt)),nwp_s1jfn(s1_jfn(t));
+    double cwp_djfn(d_jfn(t-dt)),nwp_djfn(d_jfn(t));
+    nwp.s_a = cwp.s_a + (s1_jfn(t-dt)+s1_jfn(t))*0.5*dt/cwp.ds1ds;
+    nwp.s_v = cwp.s_v + (cwp.s_a+nwp.s_a)*0.5*dt;
+    nwp.s = cwp.s + (cwp.s_v+nwp.s_v)*0.5*dt;
+    nwp.d_a = cwp.d_a + (d_jfn(t-dt)+d_jfn(t))*0.5*dt;
+    nwp.d_v = cwp.d_v + (cwp.d_a+nwp.d_a)*0.5*dt;
+    nwp.d = cwp.d + (cwp.d_v+nwp.d_v)*0.5*dt;
+    if(nwp.s>s2) {
+      wp1 = wp2;
+      wp2 = wp3;
+      wp3 = (wp3+1)%maps_s.size();
+      s1 = maps_s[wp1];
+      s2 = maps_s[wp2];
+      pd1 = pd2;
+      pd2 = pd(wp2,wp3);
+      xy = XY(pd1,pd2,s1,s2);
+    }
+    std::tie(nwp.x,nwp.y,nwp.ds1ds) = xy(nwp.s,nwp.d);
+    total_t+=dt;
+    num_points_created++;
+    nwp.wp1 = wp1;
+    nwp.wp2 = wp2;
+    nwp.wp3 = wp3;
+    wp.push_back(nwp);
+    fout<<num_points_created<<","<<wp1<<","<<wp2<<","<<wp3<<","<<target_lane<<","<<s1<<","<<s2<<","<<nwp.s<<","<<nwp.s_a<<","<<nwp.s_v<<","<<nwp.d<<","<<nwp.d_a<<","<<nwp.d_v
+        <<","<<nwp.ds1ds<<","<<nwp_s1jfn<<","<<nwp_djfn<<","<<total_t<<","<<t<<","<<call_id<<","<<nwp.x<<","<<nwp.y<<","<<change_lane_dt;
+    auto surrounding_cars = getCarsData(sensor_fusion,nwp.s,nwp.s_v,wp.size()*dt);
+    for(auto x : surrounding_cars) {
+      double back_s,back_v,back_dist,front_s,front_v,front_dist;
+      std::tie(back_s,back_v,back_dist,front_s,front_v,front_dist) = x;
+      double back_dv,front_dv;
+      back_dv = double_equals(back_v,sentinel)?sentinel:nwp.s_v-back_v;
+      front_dv = double_equals(front_v,sentinel)?sentinel:nwp.s_v-front_v;
+
+      for(auto tmp : {back_s,back_v,back_dist,back_dv,front_s,front_v,front_dist,front_dv}) {
+        if(double_equals(fabs(tmp),sentinel))
+          fout<<",";
+        else
+          fout<<","<<tmp;
+      }
+    }
+    fout<<std::endl;
+    change_lane_dt-=dt;
+    if(change_lane_dt<0)
+      change_lane_dt = 0.0;
+    t+=dt;
+    cwp = nwp;
+  }
+  fout<<std::flush;
+}
+
+vector<double> getXY(double s,
+                     double d,
+                     const vector<double>& maps_s,
+                     const vector<double>& maps_x,
+                     const vector<double>& maps_y) {
+  int prev_wp = -1;
+  while (s > maps_s[prev_wp + 1] && (prev_wp < (int) (maps_s.size() - 1))) {
+    prev_wp++;
+  }
+
+
+  int wp2 = (prev_wp + 1) % maps_x.size();
+  int wp3 = (wp2+1) %maps_x.size();
+  double heading =
+      atan2((maps_y[wp2] - maps_y[prev_wp]), (maps_x[wp2] - maps_x[prev_wp]));
+  double heading1 =
+    atan2((maps_y[wp3]-maps_y[wp2]),(maps_x[wp3]-maps_x[wp2]));
+  // the x,y,s along the segment
+  double seg_s = (s - maps_s[prev_wp]);
+  double seg_x = maps_x[prev_wp] + seg_s * cos(heading);
+  double seg_y = maps_y[prev_wp] + seg_s * sin(heading);
+  double perp_heading = heading - pi() / 2;
+  double x = seg_x + d * cos(perp_heading);
+  double y = seg_y + d * sin(perp_heading);
+  return {x, y};
+}
+
+
 bool
 possibleToChange(int laneId,
-                 json& sensor_fusion,
+                 sfdtype& sensor_fusion,
                  double car_s /*already at ref_dt*/,
                  double car_v,
                  double ref_dt,
@@ -547,9 +686,9 @@ possibleToChange(int laneId,
                  double& target_vel) {
 
    double nearest_car_front_s = sentinel;
-   double nearest_car_front_vel = 1000;
+   double nearest_car_front_vel = sentinel;
    double nearest_car_back_s = sentinel;
-   double nearest_car_back_vel = 1000;
+   double nearest_car_back_vel = sentinel;
    for (auto sf:sensor_fusion) {
      double d = sf[6];
      if (d < lane_width * (laneId + 1) && d > lane_width * laneId) {
@@ -573,50 +712,44 @@ possibleToChange(int laneId,
        }
      }
    }
-   // assuming 0 acceleration
-   double nearest_car_back_s_time_horizon =
-       advance_s(time_horizon, nearest_car_back_s, nearest_car_back_vel);
-   double nearest_car_front_s_time_horizon =
-       advance_s(time_horizon, nearest_car_front_s, nearest_car_front_vel);
-   bool no_vehicle_behind =
-       double_equals(nearest_car_back_s_time_horizon, sentinel);
-   bool no_vehicle_front =
-       double_equals(nearest_car_front_s_time_horizon, sentinel);
+   double time_horizon = num_waypoints*dt - ref_dt;
+   bool no_vehicle_behind = double_equals(nearest_car_back_s, sentinel);
+   bool no_vehicle_front = double_equals(nearest_car_front_s, sentinel);
    if (no_vehicle_behind && no_vehicle_front) {
      target_s = advance_s(time_horizon, car_s, max_vel);
      target_vel = max_vel;
      return true;
    } else if (no_vehicle_behind) {
      if (dist(car_s, nearest_car_front_s) > 1.5 * lane_width) {
-       target_s = rescind_s(nearest_car_front_s_time_horizon, 1.5 * lane_width);
+       target_s = nearest_car_front_s;
        target_vel = std::min(max_vel, nearest_car_front_vel);
        return true;
      }
    } else if (no_vehicle_front) {
      if (dist(nearest_car_back_s, car_s) > 2 * lane_width) {
-       target_s = advance_s(nearest_car_back_s_time_horizon, 3 * lane_width);
+       target_s = advance_s(time_horizon, car_s, max_vel);
        target_vel = max_vel;
        return true;
      }
    } else {
-     if ((dist(nearest_car_back_s_time_horizon, nearest_car_front_s_time_horizon)
+     if ((dist(nearest_car_back_s, nearest_car_front_s)
          > 4 * lane_width) &&
          (dist(nearest_car_back_s, car_s) > 3 * lane_width) &&
          (dist(car_s, nearest_car_front_s) > 1.5 * lane_width)) {
-       target_s = rescind_s(nearest_car_front_s_time_horizon, 1.5 * lane_width);
+       target_s = nearest_car_front_s;
        target_vel = std::min(max_vel, nearest_car_front_vel);
        return true;
      }
    }
    return false;
  }
-double change_lane_dt = 0;
-int target_lane;
+
+
  enum DIRECTION { RIGHT,LEFT,SAME,NONE};
 
 double target_d(double cur_d,DIRECTION dir) {
   if(cur_d<0 || cur_d>12) {
-    throw "error";
+    mythrow("error");
   }
   double laneid;
   modf(cur_d/lane_width,&laneid);
@@ -625,6 +758,7 @@ double target_d(double cur_d,DIRECTION dir) {
   case LEFT: if(laneid>0.999999) return (laneid-1)*lane_width+2.0;
   case RIGHT: if(laneid<1.99999) return (laneid+1)*lane_width+2.0;
   }
+  mythrow("should not come here");
 }
 
 std::tuple<std::function<double(double)>,std::function<double(double)>>
@@ -633,51 +767,68 @@ std::tuple<std::function<double(double)>,std::function<double(double)>>
   auto cwp=carStateAtBeginningOfNewPoints;
   double cur_lane;
   modf(cwp.d/lane_width,&cur_lane);
-   double tmax = -10;
+  double tmax = -10;
    // jfn,v1,delta_t,delta_d,Direction,
-   std::vector<std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double>> carsAheadDataNew;
+   std::vector<std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double,DIRECTION>> carsAheadDataNew;
    for(auto carAheadData : carsAheadData) {
      double v1,s1;
      DIRECTION dir;
      std::tie(v1,s1,dir) = carAheadData;
      double const safeTime = 1; //seconds
-     double const minDist = lane_width; //meters
+     double const minDist = lane_width*3; //meters
      double delta_d_s = s1-cwp.s-minDist-v1*safeTime;
      std::function<double(double)> jfn_s1,jfn_d;
      double delta_t_s;
      double delta_t_d;
      double cjmax,camax,cvmax,cur_change_lane_dt;
-     if(change_lane_dt<wp.size()*dt && dir==SAME) {
-       cjmax = sqrt(max_jerk*max_jerk-d_jmax*d_jmax);
-       camax = sqrt(max_acc*max_acc-d_amax*d_amax);
-       cvmax = sqrt(max_vel*max_vel-d_vmax*d_vmax);
-       std::tie(jfn_d,delta_t_d) = achieveZeroAcelAndVel(cwp.d_a,cwp.d_v,-d_vmax,d_vmax,target_d(cwp.d,SAME)-cwp.d,d_amax,d_jmax);
-       cur_change_lane_dt = 0.0;
+     if(change_lane_dt<dt) { //wp.size()*dt) {
+       if(dir==SAME) {
+         cjmax = sqrt(max_jerk*max_jerk-d_jmax*d_jmax);
+         camax = sqrt(max_acc*max_acc-d_amax*d_amax);
+         cvmax = sqrt(max_vel*max_vel-d_vmax*d_vmax);
+         std::tie(jfn_d,delta_t_d) = achieveZeroAcelAndVel(cwp.d_a,cwp.d_v,-d_vmax,d_vmax,target_lane*lane_width+2.0-cwp.d,d_amax,d_jmax);
+         cur_change_lane_dt =  change_lane_dt;
+       } else {
+         cjmax = sqrt(max_jerk*max_jerk-lcd_jmax*lcd_jmax);
+         camax = sqrt(max_acc*max_acc-lcd_amax*lcd_amax);
+         cvmax = sqrt(max_vel*max_vel-lcd_vmax*lcd_vmax);
+         std::tie(jfn_d,delta_t_d) = achieveZeroAcelAndVel(cwp.d_a,cwp.d_v,-lcd_vmax,lcd_vmax,target_d(target_lane*lane_width+2.0,dir)-cwp.d,lcd_amax,lcd_jmax);
+         cur_change_lane_dt = delta_t_d;
+       }
+     } else if(dir!=SAME) {
+       mythrow("should not come here");
      } else {
        cjmax = sqrt(max_jerk*max_jerk-lcd_jmax*lcd_jmax);
        camax = sqrt(max_acc*max_acc-lcd_amax*lcd_amax);
        cvmax = sqrt(max_vel*max_vel-lcd_vmax*lcd_vmax);
-       std::tie(jfn_d,delta_t_d) = achieveZeroAcelAndVel(cwp.d_a,cwp.d_v,-d_vmax,d_vmax,target_lane*lane_width+2.0-cwp.d,d_amax,d_jmax);
-       cur_change_lane_dt = delta_t_d;
+       std::tie(jfn_d,delta_t_d) = achieveZeroAcelAndVel(cwp.d_a,cwp.d_v,-lcd_vmax,lcd_vmax,target_lane*lane_width+2.0-cwp.d,lcd_amax,lcd_jmax);
+       cur_change_lane_dt =  change_lane_dt;
      }
 
      std::tie(jfn_s1,delta_t_s) = achieveZeroAcelAndVel(cwp.s_a,cwp.s_v-v1,-v1,cvmax-v1,delta_d_s,camax,cjmax);
-     carsAheadDataNew.push_back(std::make_tuple(jfn_s1,v1,delta_d_s,jfn_d,cur_change_lane_dt));
+     carsAheadDataNew.push_back(std::make_tuple(jfn_s1,v1,delta_d_s,jfn_d,cur_change_lane_dt,dir));
      if(tmax<delta_t_s) {
        tmax = delta_t_s;
      }
    }
-   auto h = [tmax](const std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double>& x) {
+   auto h = [tmax](const std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double,DIRECTION>& x) {
               double v1=std::get<1>(x);
               double delta_d = std::get<2>(x);
               return delta_d+v1*tmax;
             };
-   auto cmp = [h](const std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double>& a,
-		  const std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double>& b) {
+   auto cmp = [h](const std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double,DIRECTION>& a,
+		  const std::tuple<std::function<double(double)>,double,double,std::function<double(double)>,double,DIRECTION>& b) {
                   return h(a)<h(b);
                 };
    std::function<double(double)> jfn_s1,jfn_d;
-   std::tie(jfn_s1,std::ignore,std::ignore,jfn_d,change_lane_dt) = *std::max_element(carsAheadDataNew.begin(),carsAheadDataNew.end(),cmp);
+   DIRECTION fdir;
+   std::tie(jfn_s1,std::ignore,std::ignore,jfn_d,change_lane_dt,fdir) = *std::max_element(carsAheadDataNew.begin(),carsAheadDataNew.end(),cmp);
+   switch(fdir) {
+   case SAME : break;
+   case LEFT : target_lane-=1; break;
+   case RIGHT : target_lane +=1; break;
+   };
+
    return std::make_tuple(jfn_s1,jfn_d);
  }
 
@@ -713,17 +864,23 @@ auto chk = [](double est,double act,const char* name) {
 void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car_s,double car_d,double car_yaw,double car_speed) {
   if(wp.size()==0) {
     WayPoint p;
-    p.s = car_s;
     p.x = car_x;
     p.y = car_y;
-    p.d = car_d;
+    double px,py;
+    auto pt = getXY(car_s,car_d,map_waypoints_s,map_waypoints_x,map_waypoints_y);
+    px = pt[0];
+    py = pt[1];
+    std::tie(p.s,p.d) = getMySD(p.x,p.y,car_s,car_d);
     p.s_v = car_speed;
     p.d_v = 0;
     p.d_a = 0;
     p.s_a = 0;
-    int wp2 = std::lower_bound(map_waypoints_s.begin(),map_waypoints_s.end(),car_s)-map_waypoints_s.begin();
+    int wp2 = std::lower_bound(map_waypoints_s.begin(),map_waypoints_s.end(),p.s)-map_waypoints_s.begin();
     int wp1 = wp2>0?wp2-1:map_waypoints_s.size()-1;
     int wp3 = (wp2+1)%map_waypoints_s.size();
+    p.wp1 = wp1;
+    p.wp2 = wp2;
+    p.wp3 = wp3;
     auto pd1 = pd(wp1,wp2);
     auto pd2 = pd(wp2,wp3);
     double x, y;
@@ -732,11 +889,15 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
     chk(y,p.y,"car_y");
     carStateAtBeginningOfNewPoints = p;
     currentCarState = p;
+    wp.push_back(p);
   } else {
+
     auto sent_size = wp.size();
+
     auto consumed = sent_size-new_prev_size;
-    change_lane_dt -= consumed*dt;
-    if(change_lane_dt<0)
+    std::cout<<" sent_size : "<<wp.size()<<" consumed : "<<consumed <<" new_prev_size : "<<new_prev_size<<std::endl;
+    //change_lane_dt -= consumed*dt;
+    if(change_lane_dt<dt)
       change_lane_dt = 0;
     int cid = consumed-1;
     auto cwp = wp[cid];
@@ -748,7 +909,7 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
       est_yaw = atan2(cwp.y-pwp.y,cwp.x-pwp.x);
     }
     double est_speed = sqrt(cwp.s_v*cwp.ds1ds*cwp.s_v*cwp.ds1ds+cwp.d_v*cwp.d_v);
-       chk(cwp.s,car_s,"car_s");
+    chk(cwp.s,car_s,"car_s");
     chk(cwp.d,car_d,"car_d");
     chk(cwp.x,car_x,"car_x");
     chk(cwp.y,car_y,"car_y");
@@ -759,9 +920,10 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
     }
   }
 }
-
-
+using namespace std::chrono;
+std::ofstream fout_sent("sent.csv");
  int main() {
+   fout_sent<<"call_id,wp_id,x,y,v,a,j"<<std::endl<<std::flush;
    read_map();
    uWS::Hub h;
    h.onMessage([](
@@ -775,29 +937,28 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
          auto j = json::parse(s);
          string event = j[0].get<string>();
          if (event == "telemetry") {
+           static high_resolution_clock::time_point last_left_time = high_resolution_clock::now();
+           high_resolution_clock::time_point t1 = high_resolution_clock::now();
+           duration<double> time_span_round_trip = duration_cast<duration<double>>(t1-last_left_time);
+          std::cout<<"round_trip_time_taken : "<<time_span_round_trip.count()<<std::endl;
+
            double car_x(j[1]["x"]), car_y(j[1]["y"]), car_s(j[1]["s"]), car_d(j[1]["d"]), car_yaw(j[1]["yaw"]),
 	     car_speed(j[1]["speed"]),end_path_s(j[1]["end_path_s"]);
-
+           car_speed /= mps2mph;
            car_yaw *= 0.03490658503;
 	   auto previous_path_x(j[1]["previous_path_x"]);
            auto prev_size = previous_path_x.size();
+           auto sensor_fusion = extractSensorFusionData( j[1]["sensor_fusion"]);
 	   resizeCachedSentData(prev_size,car_x,car_y,car_s,car_d,car_yaw,car_speed);
-           auto sensor_fusion = j[1]["sensor_fusion"];
            double car_lane;
            modf(car_d / lane_width, &car_lane);
 
 
 
-          double end_path_lane;
-	  double end_path_d;
-          if (prev_size > 0)
-            modf(end_path_d / lane_width, &end_path_lane);
-          else
-            end_path_lane = car_lane;
           json msgJson;
-           if (prev_size < 50) {
-            double left_lane_id = end_path_lane - 1;
-            double right_lane_id = end_path_lane + 1;
+           if (prev_size < num_waypoints) {
+            double left_lane_id = target_lane - 1;
+            double right_lane_id = target_lane + 1;
             double target_vel = max_vel;
             bool left_lane_change_possible(false);
             bool right_lane_change_possible(false);
@@ -806,7 +967,16 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
             double left_v, right_v, same_v;
             std::vector<std::tuple<double,double,DIRECTION>> carsAheadData;
 	    double prev_dt = prev_size*dt;
-	    if(change_lane_dt<0.1) {
+            current_lane_possible = possibleToChange(target_lane,
+                                                     sensor_fusion,
+                                                     carStateAtBeginningOfNewPoints.s,
+                                                     carStateAtBeginningOfNewPoints.s_v,
+                                                     prev_dt,
+                                                     same_s,
+                                                     same_v);
+            if(current_lane_possible)
+              carsAheadData.push_back(std::make_tuple(same_v,same_s,SAME));
+	    if(change_lane_dt<dt) {
 	      if (left_lane_id > -1) {
 		left_lane_change_possible = possibleToChange(left_lane_id,
 							     sensor_fusion,
@@ -832,37 +1002,69 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
 		}
 	      }
 	    }
-            current_lane_possible = possibleToChange(end_path_lane,
-                                                     sensor_fusion,
-                                                     carStateAtBeginningOfNewPoints.s,
-                                                     carStateAtBeginningOfNewPoints.s_v,
-                                                     prev_dt,
-                                                     same_s,
-                                                     same_v);
-            carsAheadData.push_back(std::make_tuple(same_v,same_s,SAME));
+            if(carsAheadData.size()==0)
+              mythrow("carsAheadData.size() is zero");
             std::function<double(double)> jfn_s1,jfn_d;
             std::tie(jfn_s1,jfn_d) = jerkFuncForSafeFollowingDist(carsAheadData);
-	    createWayPoints(jfn_s1,jfn_d,wp,map_waypoints_s,map_waypoints_x,map_waypoints_y);
+	    createWayPoints(jfn_s1,jfn_d,wp,map_waypoints_s,map_waypoints_x,map_waypoints_y,num_waypoints,sensor_fusion);
           }
 	   std::vector<double> next_x_vals,next_y_vals;
 	   {
-	     for(auto p : wp){
-	       next_x_vals.push_back(p.x);
+             struct SP {
+               double x,y,v,a,j;
+               int id,call_id;
+               SP() {
+               }
+               SP(double _x,double _y,double _v,double _a,double _j,int _id,int _call_id) {
+                 x=_x,y=_y,v=_v,a=_a,j=_j,id=_id,call_id = _call_id;
+               }
+             };
+             static std::deque<SP> sentPoints;
+             static int wpid=1;
+             int consumed = (sentPoints.size()-prev_size);
+             for(int j=0;j<consumed;j++) {
+               sentPoints.pop_front();
+               wpid--;
+             }
+             static double v0(0),a0(0),x0(0),y0(0);
+             int i =0;
+	     for(auto p : wp) {
+               if(i>=sentPoints.size()) {
+                 sentPoints.push_back(SP());
+               }
+               auto sp = sentPoints[i];
+               double dx(p.x-x0),dy(p.y-y0);
+               double v1(sqrt(dx*dx+dy*dy)/dt),a1((v1-v0)/dt),j1((a1-a0)/dt);
+               fout_sent<<call_id<<","<<wpid<<","<<p.x<<","<<p.y<<","<<v1<<","<<a1<<","<<j1<<std::endl;
+               sentPoints[i]=SP(p.x,p.y,v1,a1,j1,wpid,call_id);
+               v0 = v1;
+               a0 = a1;
+               x0 = p.x;
+               y0 = p.y;
+               next_x_vals.push_back(p.x);
 	       next_y_vals.push_back(p.y);
+               wpid++;
+               i++;
 	     }
+             fout_sent<<std::flush;
 	   }
 	   msgJson["next_x"] = next_x_vals;
-          msgJson["next_y"] = next_y_vals;
-	  auto msg = "42[\"control\"," + msgJson.dump() + "]";
-          //this_thread::sleep_for(chrono::milliseconds(1000));
-          ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-        }
-      } else {
-        // Manual driving
-        std::string msg = "42[\"manual\",{}]";
-        ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
-      }
-    }
+           msgJson["next_y"] = next_y_vals;
+           auto msg = "42[\"control\"," + msgJson.dump() + "]";
+           //this_thread::sleep_for(chrono::milliseconds(1000));
+           ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+           high_resolution_clock::time_point t2 = high_resolution_clock::now();
+           duration<double> time_span = duration_cast<duration<double>>(t2-t1);
+           last_left_time = t2;
+           std::cout<<"time_taken : "<<time_span.count()<<std::endl;
+           call_id++;
+         }
+       } else {
+         // Manual driving
+         std::string msg = "42[\"manual\",{}]";
+         ws.send(msg.data(), msg.length(), uWS::OpCode::TEXT);
+       }
+     }
   });
   // We don't need this since we're not using HTTP but if it's removed the
   // program
