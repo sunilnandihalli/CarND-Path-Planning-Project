@@ -889,7 +889,6 @@ void resizeCachedSentData(int new_prev_size,double car_x,double car_y,double car
     chk(y,p.y,"car_y");
     carStateAtBeginningOfNewPoints = p;
     currentCarState = p;
-    wp.push_back(p);
   } else {
 
     auto sent_size = wp.size();
