@@ -732,12 +732,12 @@ possibleToChange(int laneId,
        return true;
      }
    } else {
+     target_s = nearest_car_front_s;
+     target_vel = std::min(max_vel, nearest_car_front_vel);  
      if ((dist(nearest_car_back_s, nearest_car_front_s)
          > 4 * lane_width) &&
          (dist(nearest_car_back_s, car_s) > 3 * lane_width) &&
          (dist(car_s, nearest_car_front_s) > 1.5 * lane_width)) {
-       target_s = nearest_car_front_s;
-       target_vel = std::min(max_vel, nearest_car_front_vel);
        return true;
      }
    }
@@ -957,49 +957,42 @@ std::ofstream fout_sent("sent.csv");
 
           json msgJson;
            if (prev_size < num_waypoints) {
-            double left_lane_id = target_lane - 1;
-            double right_lane_id = target_lane + 1;
-            double target_vel = max_vel;
-            bool left_lane_change_possible(false);
-            bool right_lane_change_possible(false);
-            bool current_lane_possible(false);
-            double left_s, right_s, same_s;
-            double left_v, right_v, same_v;
             std::vector<std::tuple<double,double,DIRECTION>> carsAheadData;
 	    double prev_dt = prev_size*dt;
-            current_lane_possible = possibleToChange(target_lane,
-                                                     sensor_fusion,
-                                                     carStateAtBeginningOfNewPoints.s,
-                                                     carStateAtBeginningOfNewPoints.s_v,
-                                                     prev_dt,
-                                                     same_s,
-                                                     same_v);
-            if(current_lane_possible)
-              carsAheadData.push_back(std::make_tuple(same_v,same_s,SAME));
+	    {
+	      double same_s,same_v;
+	      if(!possibleToChange(target_lane,
+				   sensor_fusion,
+				   carStateAtBeginningOfNewPoints.s,
+				   carStateAtBeginningOfNewPoints.s_v,
+				   prev_dt,
+				   same_s,
+				   same_v))
+		std::cout<<"same lane also not possible"<<std::endl;
+	      carsAheadData.push_back(std::make_tuple(same_v,same_s,SAME));
+	    }
 	    if(change_lane_dt<dt) {
-	      if (left_lane_id > -1) {
-		left_lane_change_possible = possibleToChange(left_lane_id,
-							     sensor_fusion,
-							     carStateAtBeginningOfNewPoints.s,
-							     carStateAtBeginningOfNewPoints.s_v,
-							     prev_dt,
-							     left_s,
-							     left_v);
-		if(left_lane_change_possible) {
+	      {
+		double left_lane_id = target_lane - 1,left_s,left_v;
+		if (left_lane_id > -1 &&  possibleToChange(left_lane_id,
+							   sensor_fusion,
+							   carStateAtBeginningOfNewPoints.s,
+							   carStateAtBeginningOfNewPoints.s_v,
+							   prev_dt,
+							   left_s,
+							   left_v))
 		  carsAheadData.push_back(std::make_tuple(left_v,left_s,LEFT));
-		}
 	      }
-	      if (right_lane_id < 3) {
-		right_lane_change_possible = possibleToChange(right_lane_id,
-							      sensor_fusion,
-							      carStateAtBeginningOfNewPoints.s,
-							      carStateAtBeginningOfNewPoints.s_v,
-							      prev_dt,
-							      right_s,
-							      right_v);
-		if(right_lane_change_possible) {
-		  carsAheadData.push_back(std::make_tuple(right_v,right_s,RIGHT));
-		}
+	      {
+		double right_lane_id = target_lane + 1,right_s,right_v;
+		if (right_lane_id < 3 && possibleToChange(right_lane_id,
+							sensor_fusion,
+							carStateAtBeginningOfNewPoints.s,
+							carStateAtBeginningOfNewPoints.s_v,
+							prev_dt,
+							right_s,
+							right_v))
+		carsAheadData.push_back(std::make_tuple(right_v,right_s,RIGHT));
 	      }
 	    }
             if(carsAheadData.size()==0)
